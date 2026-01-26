@@ -310,6 +310,28 @@ def create_parser() -> argparse.ArgumentParser:
         help="Merge SOURCE_ID into TARGET_ID",
     )
 
+    # stale command
+    stale_parser = subparsers.add_parser(
+        "stale",
+        help="Find entries that haven't been used recently",
+    )
+    stale_parser.add_argument(
+        "--days",
+        type=int,
+        default=90,
+        help="Days of inactivity to consider stale (default: 90)",
+    )
+    stale_parser.add_argument(
+        "--project",
+        help="Only check entries for this project",
+    )
+    stale_parser.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+
     return parser
 
 
@@ -745,6 +767,39 @@ def cmd_duplicates(args: argparse.Namespace, km: KnowledgeManager) -> int:
     return 0
 
 
+def cmd_stale(args: argparse.Namespace, km: KnowledgeManager) -> int:
+    """Handle the stale command."""
+    entries = km.find_stale(days=args.days, project=args.project)
+
+    if not entries:
+        print(f"No entries inactive for more than {args.days} days.")
+        return 0
+
+    if args.format == "json":
+        output = []
+        for entry in entries:
+            output.append(
+                {
+                    "id": entry["id"],
+                    "title": entry["title"],
+                    "days_stale": entry.get("days_stale"),
+                    "last_used": entry.get("last_used"),
+                    "usage_count": entry.get("usage_count", 0),
+                }
+            )
+        print(json.dumps(output, indent=2))
+    else:
+        print(f"Found {len(entries)} stale entries (>{args.days} days inactive):\n")
+        for entry in entries:
+            days = entry.get("days_stale")
+            days_str = f"{days} days" if days else "unknown"
+            usage = entry.get("usage_count", 0)
+            print(f"  {entry['id']}: {entry['title']}")
+            print(f"    Inactive: {days_str}, Used: {usage}x")
+
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """Main entry point for the CLI."""
     parser = create_parser()
@@ -787,6 +842,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_sync(args, km)
         elif args.command == "duplicates":
             return cmd_duplicates(args, km)
+        elif args.command == "stale":
+            return cmd_stale(args, km)
         else:
             parser.print_help()
             return 0

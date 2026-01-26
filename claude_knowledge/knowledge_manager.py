@@ -793,6 +793,78 @@ class KnowledgeManager:
 
         return duplicate_groups
 
+    def find_stale(
+        self,
+        days: int = 90,
+        project: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Find entries that haven't been used or updated recently.
+
+        Args:
+            days: Number of days to consider an entry stale.
+            project: Optional project filter.
+
+        Returns:
+            List of stale entries with staleness info.
+        """
+        from datetime import timedelta
+
+        cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+
+        cursor = self.conn.cursor()
+
+        # Find entries where both last_used and updated_at are older than cutoff
+        # or where last_used is NULL and updated_at (or created) is older than cutoff
+        if project:
+            cursor.execute(
+                """
+                SELECT id, title, description, created, updated_at, last_used, usage_count
+                FROM knowledge
+                WHERE project = ?
+                AND (
+                    (last_used IS NOT NULL AND last_used < ? AND updated_at < ?)
+                    OR (last_used IS NULL AND COALESCE(updated_at, created) < ?)
+                )
+                ORDER BY COALESCE(last_used, updated_at, created) ASC
+                """,
+                (project, cutoff, cutoff, cutoff),
+            )
+        else:
+            cursor.execute(
+                """
+                SELECT id, title, description, created, updated_at, last_used, usage_count
+                FROM knowledge
+                WHERE (
+                    (last_used IS NOT NULL AND last_used < ? AND updated_at < ?)
+                    OR (last_used IS NULL AND COALESCE(updated_at, created) < ?)
+                )
+                ORDER BY COALESCE(last_used, updated_at, created) ASC
+                """,
+                (cutoff, cutoff, cutoff),
+            )
+
+        rows = cursor.fetchall()
+        stale_entries = []
+
+        for row in rows:
+            entry = dict(row)
+            # Calculate days since last activity
+            last_activity = (
+                entry.get("last_used") or entry.get("updated_at") or entry.get("created")
+            )
+            if last_activity:
+                try:
+                    last_dt = datetime.fromisoformat(last_activity)
+                    days_stale = (datetime.now() - last_dt).days
+                    entry["days_stale"] = days_stale
+                except ValueError:
+                    entry["days_stale"] = None
+            else:
+                entry["days_stale"] = None
+            stale_entries.append(entry)
+
+        return stale_entries
+
     def merge_entries(
         self,
         target_id: str,

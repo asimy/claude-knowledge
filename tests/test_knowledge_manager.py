@@ -607,3 +607,134 @@ class TestDuplicateDetection:
 
         result = temp_km.merge_entries("nonexistent", id1)
         assert result is False
+
+
+class TestStalenessTracking:
+    """Tests for staleness tracking functionality."""
+
+    def test_find_stale_empty(self, temp_km):
+        """Test finding stale entries with no entries."""
+        stale = temp_km.find_stale(days=30)
+        assert stale == []
+
+    def test_find_stale_fresh_entries(self, temp_km):
+        """Test that recently created entries are not stale."""
+        temp_km.capture(
+            title="Fresh Entry",
+            description="Just created",
+            content="New content",
+        )
+        stale = temp_km.find_stale(days=30)
+        assert stale == []
+
+    def test_find_stale_with_old_entries(self, temp_km):
+        """Test finding entries that are stale."""
+        # Create an entry
+        kid = temp_km.capture(
+            title="Old Entry",
+            description="Will become stale",
+            content="Old content",
+        )
+
+        # Manually backdate the entry
+        from datetime import datetime, timedelta
+
+        old_date = (datetime.now() - timedelta(days=100)).isoformat()
+        cursor = temp_km.conn.cursor()
+        cursor.execute(
+            "UPDATE knowledge SET created = ?, updated_at = ? WHERE id = ?",
+            (old_date, old_date, kid),
+        )
+        temp_km.conn.commit()
+
+        # Should find the stale entry
+        stale = temp_km.find_stale(days=30)
+        assert len(stale) == 1
+        assert stale[0]["id"] == kid
+        assert stale[0]["days_stale"] >= 100
+
+    def test_find_stale_respects_threshold(self, temp_km):
+        """Test that days parameter is respected."""
+        kid = temp_km.capture(
+            title="Test Entry",
+            description="Test",
+            content="Content",
+        )
+
+        # Backdate to 50 days ago
+        from datetime import datetime, timedelta
+
+        old_date = (datetime.now() - timedelta(days=50)).isoformat()
+        cursor = temp_km.conn.cursor()
+        cursor.execute(
+            "UPDATE knowledge SET created = ?, updated_at = ? WHERE id = ?",
+            (old_date, old_date, kid),
+        )
+        temp_km.conn.commit()
+
+        # Should not be stale with 90 day threshold
+        stale_90 = temp_km.find_stale(days=90)
+        assert len(stale_90) == 0
+
+        # Should be stale with 30 day threshold
+        stale_30 = temp_km.find_stale(days=30)
+        assert len(stale_30) == 1
+
+    def test_find_stale_considers_last_used(self, temp_km):
+        """Test that last_used date prevents staleness."""
+        kid = temp_km.capture(
+            title="Used Entry",
+            description="Has been used recently",
+            content="Content",
+        )
+
+        # Backdate creation but set recent last_used
+        from datetime import datetime, timedelta
+
+        old_date = (datetime.now() - timedelta(days=100)).isoformat()
+        recent_date = datetime.now().isoformat()
+        cursor = temp_km.conn.cursor()
+        cursor.execute(
+            "UPDATE knowledge SET created = ?, updated_at = ?, last_used = ? WHERE id = ?",
+            (old_date, old_date, recent_date, kid),
+        )
+        temp_km.conn.commit()
+
+        # Should not be stale because it was recently used
+        stale = temp_km.find_stale(days=30)
+        assert len(stale) == 0
+
+    def test_find_stale_project_filter(self, temp_km):
+        """Test that project filter works."""
+        kid1 = temp_km.capture(
+            title="Project A Entry",
+            description="In project A",
+            content="Content",
+            project="project-a",
+        )
+        kid2 = temp_km.capture(
+            title="Project B Entry",
+            description="In project B",
+            content="Content",
+            project="project-b",
+        )
+
+        # Backdate both entries
+        from datetime import datetime, timedelta
+
+        old_date = (datetime.now() - timedelta(days=100)).isoformat()
+        cursor = temp_km.conn.cursor()
+        cursor.execute(
+            "UPDATE knowledge SET created = ?, updated_at = ? WHERE id IN (?, ?)",
+            (old_date, old_date, kid1, kid2),
+        )
+        temp_km.conn.commit()
+
+        # Filter by project
+        stale_a = temp_km.find_stale(days=30, project="project-a")
+        assert len(stale_a) == 1
+        assert stale_a[0]["id"] == kid1
+
+        stale_b = temp_km.find_stale(days=30, project="project-b")
+        assert len(stale_b) == 1
+        assert stale_b[0]["id"] == kid2
