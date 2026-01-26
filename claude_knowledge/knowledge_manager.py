@@ -2,10 +2,22 @@
 
 import json
 import sqlite3
+import sys
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+# File locking - platform specific
+if sys.platform != "win32":
+    import fcntl
+
+    HAS_FCNTL = True
+else:
+    HAS_FCNTL = False
 
 import chromadb
 from chromadb.config import Settings
@@ -45,6 +57,8 @@ class KnowledgeManager:
 
     EMBEDDING_MODEL = "all-MiniLM-L6-v2"
     COLLECTION_NAME = "knowledge"
+    # Whitelist of allowed date fields for SQL queries (prevents SQL injection)
+    ALLOWED_DATE_FIELDS = frozenset({"created", "last_used"})
 
     def __init__(self, base_path: str = "~/.claude_knowledge"):
         """Initialize the knowledge manager.
@@ -239,6 +253,81 @@ class KnowledgeManager:
             self._model = SentenceTransformer(self.EMBEDDING_MODEL)
         return self._model
 
+    def _validate_date_field(self, date_field: str) -> None:
+        """Validate that date_field is in the allowed whitelist.
+
+        Args:
+            date_field: The date field name to validate.
+
+        Raises:
+            ValueError: If date_field is not in ALLOWED_DATE_FIELDS.
+        """
+        if date_field not in self.ALLOWED_DATE_FIELDS:
+            allowed = ", ".join(sorted(self.ALLOWED_DATE_FIELDS))
+            raise ValueError(
+                f"Invalid date_field '{date_field}'. Must be one of: {allowed}"
+            )
+
+    @contextmanager
+    def _file_lock(self, lock_path: Path, timeout: float = 30.0) -> Iterator[None]:
+        """Acquire an exclusive file lock for sync operations.
+
+        Uses fcntl on Unix systems for proper file locking.
+        Falls back to a simple lock file mechanism on Windows.
+
+        Args:
+            lock_path: Path to the lock file.
+            timeout: Maximum seconds to wait for lock (default: 30).
+
+        Yields:
+            None when lock is acquired.
+
+        Raises:
+            TimeoutError: If lock cannot be acquired within timeout.
+        """
+        lock_file = lock_path.with_suffix(".lock")
+        start_time = time.time()
+
+        if HAS_FCNTL:
+            # Unix: Use fcntl for proper file locking
+            lock_fd = open(lock_file, "w")
+            try:
+                while True:
+                    try:
+                        fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except OSError:
+                        if time.time() - start_time > timeout:
+                            lock_fd.close()
+                            raise TimeoutError(
+                                f"Could not acquire lock on {lock_file} "
+                                f"within {timeout} seconds"
+                            ) from None
+                        time.sleep(0.1)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
+            finally:
+                lock_fd.close()
+        else:
+            # Windows: Simple lock file mechanism
+            while lock_file.exists():
+                if time.time() - start_time > timeout:
+                    raise TimeoutError(
+                        f"Could not acquire lock on {lock_file} "
+                        f"within {timeout} seconds"
+                    )
+                time.sleep(0.1)
+            try:
+                lock_file.write_text(str(datetime.now().isoformat()))
+                yield
+            finally:
+                try:
+                    lock_file.unlink()
+                except OSError:
+                    pass  # Lock file may already be removed
+
     def _generate_embedding(self, text: str) -> list[float]:
         """Generate embedding vector for text.
 
@@ -381,7 +470,13 @@ class KnowledgeManager:
 
         Returns:
             List of knowledge items with metadata and scores.
+
+        Raises:
+            ValueError: If date_field is not a valid field name.
         """
+        # Validate date_field to prevent SQL injection
+        self._validate_date_field(date_field)
+
         # Generate query embedding
         query_embedding = self._generate_embedding(query)
 
@@ -529,7 +624,13 @@ class KnowledgeManager:
 
         Returns:
             List of knowledge items with basic metadata.
+
+        Raises:
+            ValueError: If date_field is not a valid field name.
         """
+        # Validate date_field to prevent SQL injection
+        self._validate_date_field(date_field)
+
         cursor = self.conn.cursor()
 
         # Build query dynamically based on filters
@@ -726,7 +827,13 @@ class KnowledgeManager:
 
         Returns:
             List of matching knowledge items.
+
+        Raises:
+            ValueError: If date_field is not a valid field name.
         """
+        # Validate date_field to prevent SQL injection
+        self._validate_date_field(date_field)
+
         cursor = self.conn.cursor()
         # Escape LIKE wildcards to prevent pattern injection
         escaped_text = escape_like_pattern(text)
@@ -1272,21 +1379,29 @@ class KnowledgeManager:
 
         Args:
             sync_path: Path to the sync directory.
+
+        Raises:
+            TimeoutError: If unable to acquire lock within timeout.
         """
         sync_path = Path(sync_path).expanduser()
         sync_path.mkdir(parents=True, exist_ok=True)
-        (sync_path / "entries").mkdir(exist_ok=True)
-        (sync_path / "tombstones").mkdir(exist_ok=True)
 
-        # Create manifest if it doesn't exist
-        manifest_path = sync_path / "manifest.json"
-        if not manifest_path.exists():
-            self._save_manifest(sync_path, {"version": 1, "last_sync": {}, "entries": {}})
+        # Use file lock to prevent race conditions during initialization
+        with self._file_lock(sync_path / "manifest.json"):
+            (sync_path / "entries").mkdir(exist_ok=True)
+            (sync_path / "tombstones").mkdir(exist_ok=True)
 
-        # Create tombstones file if it doesn't exist
-        tombstones_path = sync_path / "tombstones" / "deleted.json"
-        if not tombstones_path.exists():
-            self._save_tombstones(sync_path, {"deletions": []})
+            # Create manifest if it doesn't exist
+            manifest_path = sync_path / "manifest.json"
+            if not manifest_path.exists():
+                self._save_manifest(
+                    sync_path, {"version": 1, "last_sync": {}, "entries": {}}
+                )
+
+            # Create tombstones file if it doesn't exist
+            tombstones_path = sync_path / "tombstones" / "deleted.json"
+            if not tombstones_path.exists():
+                self._save_tombstones(sync_path, {"deletions": []})
 
     def _load_manifest(self, sync_path: Path) -> dict[str, Any]:
         """Load sync manifest from sync directory.
@@ -1616,6 +1731,9 @@ class KnowledgeManager:
 
         Returns:
             SyncResult with counts and any conflicts.
+
+        Raises:
+            TimeoutError: If unable to acquire lock within timeout.
         """
         result = SyncResult()
 
@@ -1643,61 +1761,80 @@ class KnowledgeManager:
         if not dry_run:
             self.set_sync_path(sync_path)
 
-        manifest = self._load_manifest(sync_path)
-        tombstones = self._load_tombstones(sync_path)
-        local_state = self._get_local_state(project=project)
-        remote_state = self._get_remote_state(sync_path)
-        local_sync_state = self._get_local_sync_state()  # What this machine last synced
-        manifest_entries = manifest.get("entries", {})
+        # Acquire file lock to prevent concurrent sync operations
+        with self._file_lock(sync_path / "manifest.json"):
+            manifest = self._load_manifest(sync_path)
+            tombstones = self._load_tombstones(sync_path)
+            local_state = self._get_local_state(project=project)
+            remote_state = self._get_remote_state(sync_path)
+            local_sync_state = self._get_local_sync_state()  # What this machine last synced
+            manifest_entries = manifest.get("entries", {})
 
-        all_ids = set(local_state.keys()) | set(remote_state.keys())
+            all_ids = set(local_state.keys()) | set(remote_state.keys())
 
-        for entry_id in all_ids:
-            local = local_state.get(entry_id)
-            remote = remote_state.get(entry_id)
-            last_synced = local_sync_state.get(entry_id)  # Use local sync state
-            tombstone = tombstones.get(entry_id)
+            for entry_id in all_ids:
+                local = local_state.get(entry_id)
+                remote = remote_state.get(entry_id)
+                last_synced = local_sync_state.get(entry_id)  # Use local sync state
+                tombstone = tombstones.get(entry_id)
 
-            action = self._categorize_entry(entry_id, local, remote, last_synced, tombstone)
-
-            if action == "no_change":
-                continue
-            elif action == "push" and not pull_only:
-                self._handle_push(
-                    sync_path, entry_id, manifest_entries, local_sync_state, dry_run, result
-                )
-            elif action == "pull" and not push_only:
-                self._handle_pull(
-                    sync_path, entry_id, manifest_entries, local_sync_state, dry_run, result
-                )
-            elif action == "conflict":
-                self._handle_conflict(
-                    sync_path,
-                    entry_id,
-                    local,
-                    remote,
-                    manifest_entries,
-                    local_sync_state,
-                    strategy,
-                    push_only,
-                    pull_only,
-                    dry_run,
-                    result,
-                )
-            elif action == "delete_local" and not push_only:
-                self._handle_delete_local(entry_id, local_sync_state, dry_run, result)
-            elif action == "delete_remote" and not pull_only:
-                self._handle_delete_remote(
-                    sync_path, entry_id, manifest_entries, local_sync_state, dry_run, result
+                action = self._categorize_entry(
+                    entry_id, local, remote, last_synced, tombstone
                 )
 
-        # Update manifest and local sync state
-        if not dry_run:
-            machine_id = get_machine_id()
-            manifest["last_sync"][machine_id] = datetime.now().isoformat()
-            manifest["entries"] = manifest_entries
-            self._save_manifest(sync_path, manifest)
-            self._set_local_sync_state(local_sync_state)
+                if action == "no_change":
+                    continue
+                elif action == "push" and not pull_only:
+                    self._handle_push(
+                        sync_path,
+                        entry_id,
+                        manifest_entries,
+                        local_sync_state,
+                        dry_run,
+                        result,
+                    )
+                elif action == "pull" and not push_only:
+                    self._handle_pull(
+                        sync_path,
+                        entry_id,
+                        manifest_entries,
+                        local_sync_state,
+                        dry_run,
+                        result,
+                    )
+                elif action == "conflict":
+                    self._handle_conflict(
+                        sync_path,
+                        entry_id,
+                        local,
+                        remote,
+                        manifest_entries,
+                        local_sync_state,
+                        strategy,
+                        push_only,
+                        pull_only,
+                        dry_run,
+                        result,
+                    )
+                elif action == "delete_local" and not push_only:
+                    self._handle_delete_local(entry_id, local_sync_state, dry_run, result)
+                elif action == "delete_remote" and not pull_only:
+                    self._handle_delete_remote(
+                        sync_path,
+                        entry_id,
+                        manifest_entries,
+                        local_sync_state,
+                        dry_run,
+                        result,
+                    )
+
+            # Update manifest and local sync state
+            if not dry_run:
+                machine_id = get_machine_id()
+                manifest["last_sync"][machine_id] = datetime.now().isoformat()
+                manifest["entries"] = manifest_entries
+                self._save_manifest(sync_path, manifest)
+                self._set_local_sync_state(local_sync_state)
 
         return result
 
@@ -2163,8 +2300,13 @@ class KnowledgeManager:
 
     def close(self) -> None:
         """Close database connections."""
-        if hasattr(self, "conn"):
+        if hasattr(self, "conn") and self.conn:
             self.conn.close()
+            self.conn = None  # Prevent double-close
+
+    def __del__(self) -> None:
+        """Ensure connections are closed when object is garbage collected."""
+        self.close()
 
     def __enter__(self) -> "KnowledgeManager":
         """Context manager entry."""

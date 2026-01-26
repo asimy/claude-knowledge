@@ -1121,6 +1121,52 @@ class TestRelativeDateParsing:
         assert parse_relative_date("") is None
 
 
+class TestDateFieldValidation:
+    """Tests for date_field SQL injection prevention."""
+
+    def test_valid_date_field_created(self, temp_km):
+        """Test that 'created' is accepted as a valid date field."""
+        temp_km.capture(
+            title="Test Entry",
+            description="Test",
+            content="Content",
+        )
+        # Should not raise
+        entries = temp_km.list_all(date_field="created")
+        assert len(entries) == 1
+
+    def test_valid_date_field_last_used(self, temp_km):
+        """Test that 'last_used' is accepted as a valid date field."""
+        temp_km.capture(
+            title="Test Entry",
+            description="Test",
+            content="Content",
+        )
+        # Should not raise
+        entries = temp_km.list_all(date_field="last_used")
+        assert len(entries) == 1
+
+    def test_invalid_date_field_rejected(self, temp_km):
+        """Test that invalid date fields are rejected (SQL injection prevention)."""
+        import pytest
+
+        temp_km.capture(
+            title="Test Entry",
+            description="Test",
+            content="Content",
+        )
+
+        # Attempt SQL injection via date_field
+        with pytest.raises(ValueError, match="Invalid date_field"):
+            temp_km.list_all(date_field="created; DROP TABLE knowledge; --")
+
+        with pytest.raises(ValueError, match="Invalid date_field"):
+            temp_km.search("test", date_field="id")
+
+        with pytest.raises(ValueError, match="Invalid date_field"):
+            temp_km.retrieve("test", date_field="1=1 OR")
+
+
 class TestLevenshteinDistance:
     """Tests for Levenshtein distance utility."""
 
