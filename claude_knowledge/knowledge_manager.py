@@ -926,6 +926,91 @@ class KnowledgeManager:
 
         return True
 
+    def score_quality(
+        self,
+        project: str | None = None,
+        min_score: float | None = None,
+        max_score: float | None = None,
+    ) -> list[dict[str, Any]]:
+        """Score entries by quality based on completeness metrics.
+
+        Quality score (0-100) is calculated from:
+        - Tags present (25 points)
+        - Description length >= 50 chars (25 points)
+        - Content length >= 100 chars (25 points)
+        - Usage count > 0 (25 points)
+
+        Args:
+            project: Optional project filter.
+            min_score: Optional minimum score filter (inclusive).
+            max_score: Optional maximum score filter (inclusive).
+
+        Returns:
+            List of entries with quality_score field, sorted by score ascending.
+        """
+        cursor = self.conn.cursor()
+        if project:
+            cursor.execute(
+                """
+                SELECT id, title, description, content, tags, usage_count, created,
+                       last_used, project
+                FROM knowledge
+                WHERE project = ?
+                """,
+                (project,),
+            )
+        else:
+            cursor.execute(
+                """
+                SELECT id, title, description, content, tags, usage_count, created,
+                       last_used, project
+                FROM knowledge
+                """
+            )
+
+        rows = cursor.fetchall()
+        scored_entries = []
+
+        for row in rows:
+            entry = dict(row)
+            score = 0
+
+            # Tags present: 25 points
+            tags_json = entry.get("tags") or "[]"
+            tags_list = json_to_tags(tags_json)
+            if tags_list:
+                score += 25
+
+            # Description length >= 50 chars: 25 points
+            description = entry.get("description") or ""
+            if len(description) >= 50:
+                score += 25
+
+            # Content length >= 100 chars: 25 points
+            content = entry.get("content") or ""
+            if len(content) >= 100:
+                score += 25
+
+            # Usage count > 0: 25 points
+            usage_count = entry.get("usage_count") or 0
+            if usage_count > 0:
+                score += 25
+
+            entry["quality_score"] = score
+
+            # Apply score filters
+            if min_score is not None and score < min_score:
+                continue
+            if max_score is not None and score > max_score:
+                continue
+
+            scored_entries.append(entry)
+
+        # Sort by score ascending (lowest quality first for review)
+        scored_entries.sort(key=lambda e: e["quality_score"])
+
+        return scored_entries
+
     def export_all(self, project: str | None = None) -> list[dict[str, Any]]:
         """Export all knowledge entries as a list of dictionaries.
 

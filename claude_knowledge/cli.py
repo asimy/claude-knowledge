@@ -332,6 +332,32 @@ def create_parser() -> argparse.ArgumentParser:
         help="Output format (default: text)",
     )
 
+    # quality command
+    quality_parser = subparsers.add_parser(
+        "quality",
+        help="Score entries by quality metrics",
+    )
+    quality_parser.add_argument(
+        "--project",
+        help="Only check entries for this project",
+    )
+    quality_parser.add_argument(
+        "--min-score",
+        type=float,
+        help="Minimum quality score to include (0-100)",
+    )
+    quality_parser.add_argument(
+        "--max-score",
+        type=float,
+        help="Maximum quality score to include (0-100)",
+    )
+    quality_parser.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+
     return parser
 
 
@@ -800,6 +826,50 @@ def cmd_stale(args: argparse.Namespace, km: KnowledgeManager) -> int:
     return 0
 
 
+def cmd_quality(args: argparse.Namespace, km: KnowledgeManager) -> int:
+    """Handle the quality command."""
+    entries = km.score_quality(
+        project=args.project,
+        min_score=args.min_score,
+        max_score=args.max_score,
+    )
+
+    if not entries:
+        print("No entries found matching the criteria.")
+        return 0
+
+    if args.format == "json":
+        output = []
+        for entry in entries:
+            output.append(
+                {
+                    "id": entry["id"],
+                    "title": entry["title"],
+                    "quality_score": entry["quality_score"],
+                    "usage_count": entry.get("usage_count", 0),
+                    "has_tags": bool(entry.get("tags", "").strip()),
+                    "description_length": len(entry.get("description") or ""),
+                    "content_length": len(entry.get("content") or ""),
+                }
+            )
+        print(json.dumps(output, indent=2))
+    else:
+        print(f"Quality scores for {len(entries)} entries (sorted low to high):\n")
+        for entry in entries:
+            score = entry["quality_score"]
+            tags = "yes" if entry.get("tags", "").strip() else "no"
+            desc_len = len(entry.get("description") or "")
+            content_len = len(entry.get("content") or "")
+            usage = entry.get("usage_count", 0)
+            print(f"  {entry['id']}: {entry['title']}")
+            print(
+                f"    Score: {score}/100 | Tags: {tags} | Desc: {desc_len} chars | "
+                f"Content: {content_len} chars | Used: {usage}x"
+            )
+
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """Main entry point for the CLI."""
     parser = create_parser()
@@ -844,6 +914,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_duplicates(args, km)
         elif args.command == "stale":
             return cmd_stale(args, km)
+        elif args.command == "quality":
+            return cmd_quality(args, km)
         else:
             parser.print_help()
             return 0

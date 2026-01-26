@@ -738,3 +738,175 @@ class TestStalenessTracking:
         stale_b = temp_km.find_stale(days=30, project="project-b")
         assert len(stale_b) == 1
         assert stale_b[0]["id"] == kid2
+
+
+class TestQualityScoring:
+    """Tests for quality scoring functionality."""
+
+    def test_score_quality_empty(self, temp_km):
+        """Test scoring with no entries."""
+        scored = temp_km.score_quality()
+        assert scored == []
+
+    def test_score_quality_full_score(self, temp_km):
+        """Test entry with all quality criteria met gets 100."""
+        temp_km.capture(
+            title="High Quality Entry",
+            description="This is a detailed description that explains the entry " * 2,
+            content="This content has useful information about quality scoring " * 3,
+            tags=["tag1"],
+        )
+
+        # Retrieve to increment usage count
+        temp_km.retrieve("high quality entry", n_results=1)
+
+        scored = temp_km.score_quality()
+        assert len(scored) == 1
+        assert scored[0]["quality_score"] == 100
+
+    def test_score_quality_no_tags(self, temp_km):
+        """Test entry without tags loses 25 points."""
+        temp_km.capture(
+            title="Entry Without Tags",
+            description="This is a detailed description that explains the entry " * 2,
+            content="This content has useful information about quality scoring " * 3,
+        )
+
+        # Retrieve to get usage
+        temp_km.retrieve("entry without tags", n_results=1)
+
+        scored = temp_km.score_quality()
+        assert scored[0]["quality_score"] == 75
+
+    def test_score_quality_short_description(self, temp_km):
+        """Test entry with short description loses 25 points."""
+        temp_km.capture(
+            title="Short Description Entry",
+            description="Short",  # Less than 50 chars
+            content="This content has useful information about quality scoring " * 3,
+            tags=["tag1"],
+        )
+
+        # Retrieve to get usage
+        temp_km.retrieve("short description entry", n_results=1)
+
+        scored = temp_km.score_quality()
+        assert scored[0]["quality_score"] == 75
+
+    def test_score_quality_short_content(self, temp_km):
+        """Test entry with short content loses 25 points."""
+        temp_km.capture(
+            title="Short Content Entry",
+            description="This is a detailed description that explains the entry " * 2,
+            content="Short",  # Less than 100 chars
+            tags=["tag1"],
+        )
+
+        # Retrieve to get usage
+        temp_km.retrieve("short content entry", n_results=1)
+
+        scored = temp_km.score_quality()
+        assert scored[0]["quality_score"] == 75
+
+    def test_score_quality_never_used(self, temp_km):
+        """Test entry that's never been used loses 25 points."""
+        temp_km.capture(
+            title="Never Used",
+            description="A" * 50,
+            content="B" * 100,
+            tags=["tag1"],
+        )
+
+        # Don't retrieve it
+        scored = temp_km.score_quality()
+        assert scored[0]["quality_score"] == 75
+
+    def test_score_quality_sorted_ascending(self, temp_km):
+        """Test that results are sorted by score ascending."""
+        # Create low quality entry
+        temp_km.capture(
+            title="Low Quality",
+            description="Short",
+            content="Short",
+        )
+
+        # Create high quality entry
+        temp_km.capture(
+            title="High Quality",
+            description="A" * 50,
+            content="B" * 100,
+            tags=["tag1"],
+        )
+
+        # Use the high quality entry
+        temp_km.retrieve("high quality", n_results=1)
+
+        scored = temp_km.score_quality()
+        assert len(scored) == 2
+        # Low quality should be first
+        assert scored[0]["quality_score"] < scored[1]["quality_score"]
+
+    def test_score_quality_min_filter(self, temp_km):
+        """Test minimum score filter."""
+        # Create low quality entry
+        temp_km.capture(
+            title="Low Quality",
+            description="Short",
+            content="Short",
+        )
+
+        # Create high quality entry
+        kid_high = temp_km.capture(
+            title="High Quality",
+            description="A" * 50,
+            content="B" * 100,
+            tags=["tag1"],
+        )
+        temp_km.retrieve("high quality", n_results=1)
+
+        # Filter for high scores only
+        scored = temp_km.score_quality(min_score=50)
+        assert len(scored) == 1
+        assert scored[0]["id"] == kid_high
+
+    def test_score_quality_max_filter(self, temp_km):
+        """Test maximum score filter."""
+        # Create low quality entry
+        kid_low = temp_km.capture(
+            title="Low Quality",
+            description="Short",
+            content="Short",
+        )
+
+        # Create high quality entry
+        temp_km.capture(
+            title="High Quality",
+            description="A" * 50,
+            content="B" * 100,
+            tags=["tag1"],
+        )
+        temp_km.retrieve("high quality", n_results=1)
+
+        # Filter for low scores only
+        scored = temp_km.score_quality(max_score=50)
+        assert len(scored) == 1
+        assert scored[0]["id"] == kid_low
+
+    def test_score_quality_project_filter(self, temp_km):
+        """Test project filter works with quality scoring."""
+        temp_km.capture(
+            title="Project A Entry",
+            description="In project A",
+            content="Content",
+            project="project-a",
+        )
+        temp_km.capture(
+            title="Project B Entry",
+            description="In project B",
+            content="Content",
+            project="project-b",
+        )
+
+        scored_a = temp_km.score_quality(project="project-a")
+        assert len(scored_a) == 1
+        assert "Project A" in scored_a[0]["title"]
