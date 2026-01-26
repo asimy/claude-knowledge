@@ -106,6 +106,15 @@ class KnowledgeManager:
         cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_knowledge_last_used ON knowledge(last_used DESC)
         """)
+        # Table for tracking processed sessions
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS processed_sessions (
+                session_id TEXT PRIMARY KEY,
+                project_path TEXT,
+                processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                entries_created INTEGER DEFAULT 0
+            )
+        """)
         self.conn.commit()
         self._migrate_schema()
 
@@ -1784,6 +1793,81 @@ class KnowledgeManager:
             if entry_id in local_sync_state:
                 del local_sync_state[entry_id]
         result.deletions_pushed += 1
+
+    # Session processing methods
+
+    def is_session_processed(self, session_id: str) -> bool:
+        """Check if a session has been processed.
+
+        Args:
+            session_id: Session UUID.
+
+        Returns:
+            True if the session has been processed.
+        """
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT 1 FROM processed_sessions WHERE session_id = ?",
+            (session_id,),
+        )
+        return cursor.fetchone() is not None
+
+    def mark_session_processed(
+        self,
+        session_id: str,
+        project_path: str,
+        entries_created: int = 0,
+    ) -> None:
+        """Mark a session as processed.
+
+        Args:
+            session_id: Session UUID.
+            project_path: Project path.
+            entries_created: Number of knowledge entries created from this session.
+        """
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """
+            INSERT OR REPLACE INTO processed_sessions
+            (session_id, project_path, processed_at, entries_created)
+            VALUES (?, ?, CURRENT_TIMESTAMP, ?)
+            """,
+            (session_id, project_path, entries_created),
+        )
+        self.conn.commit()
+
+    def get_processed_sessions(
+        self,
+        project_path: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Get list of processed sessions.
+
+        Args:
+            project_path: Optional filter by project path.
+
+        Returns:
+            List of processed session records.
+        """
+        cursor = self.conn.cursor()
+        if project_path:
+            cursor.execute(
+                """
+                SELECT session_id, project_path, processed_at, entries_created
+                FROM processed_sessions
+                WHERE project_path = ?
+                ORDER BY processed_at DESC
+                """,
+                (project_path,),
+            )
+        else:
+            cursor.execute(
+                """
+                SELECT session_id, project_path, processed_at, entries_created
+                FROM processed_sessions
+                ORDER BY processed_at DESC
+                """
+            )
+        return [dict(row) for row in cursor.fetchall()]
 
     def close(self) -> None:
         """Close database connections."""

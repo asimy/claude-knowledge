@@ -446,6 +446,59 @@ def create_parser() -> argparse.ArgumentParser:
         help="Shell to generate completions for",
     )
 
+    # summarize command
+    summarize_parser = subparsers.add_parser(
+        "summarize",
+        help="Extract knowledge from Claude Code sessions",
+    )
+    summarize_parser.add_argument(
+        "--list",
+        action="store_true",
+        dest="list_sessions",
+        help="List available sessions",
+    )
+    summarize_parser.add_argument(
+        "--session",
+        help="Session ID to summarize",
+    )
+    summarize_parser.add_argument(
+        "--preview",
+        action="store_true",
+        help="Preview extraction without capturing",
+    )
+    summarize_parser.add_argument(
+        "--auto",
+        action="store_true",
+        help="Auto-capture entries meeting confidence threshold",
+    )
+    summarize_parser.add_argument(
+        "--min-confidence",
+        type=float,
+        default=0.5,
+        help="Minimum confidence for auto-capture (default: 0.5)",
+    )
+    summarize_parser.add_argument(
+        "--since",
+        help="Summarize sessions from the last N days (e.g., '7d')",
+    )
+    summarize_parser.add_argument(
+        "--mark-processed",
+        action="store_true",
+        help="Mark session as processed without extracting",
+    )
+    summarize_project = summarize_parser.add_argument(
+        "--project",
+        help="Filter by project path",
+    )
+    if project_completer:
+        summarize_project.completer = project_completer
+    summarize_parser.add_argument(
+        "--limit",
+        type=int,
+        default=20,
+        help="Maximum sessions to list (default: 20)",
+    )
+
     return parser
 
 
@@ -1076,6 +1129,266 @@ register-python-argcomplete --shell fish claude-kb > ~/.config/fish/completions/
     return 0
 
 
+def cmd_summarize(args: argparse.Namespace, km: KnowledgeManager) -> int:
+    """Handle the summarize command."""
+    from datetime import datetime, timedelta
+
+    from claude_knowledge.session_extractor import SessionExtractor
+    from claude_knowledge.session_parser import SessionParser
+
+    parser = SessionParser()
+    extractor = SessionExtractor()
+
+    # Handle --list flag
+    if args.list_sessions:
+        sessions = parser.list_sessions(project_path=args.project, limit=args.limit)
+        if not sessions:
+            console.print("No sessions found.")
+            return 0
+
+        console.print(f"Found [cyan]{len(sessions)}[/cyan] session(s):\n")
+        for session in sessions:
+            session_id = session.get("session_id", "")[:8]
+            first_prompt = session.get("first_prompt", "")[:60]
+            if len(session.get("first_prompt", "")) > 60:
+                first_prompt += "..."
+            msg_count = session.get("message_count", 0)
+            modified = session.get("modified", "")[:10] if session.get("modified") else ""
+            project = session.get("project_path", "").split("/")[-1] or "(unknown)"
+
+            # Check if processed
+            full_id = session.get("session_id", "")
+            processed = km.is_session_processed(full_id)
+            status = "[green]processed[/green]" if processed else "[dim]pending[/dim]"
+
+            console.print(f"[dim]{session_id}[/dim] {status} [magenta]{project}[/magenta]")
+            console.print(f"  [bold]{first_prompt}[/bold]")
+            console.print(f"  [dim]{msg_count} messages, modified {modified}[/dim]")
+            console.print()
+        return 0
+
+    # Handle --since flag
+    if args.since:
+        # Parse duration (e.g., "7d", "24h")
+        since_str = args.since.lower()
+        if since_str.endswith("d"):
+            days = int(since_str[:-1])
+            since_time = datetime.now() - timedelta(days=days)
+        elif since_str.endswith("h"):
+            hours = int(since_str[:-1])
+            since_time = datetime.now() - timedelta(hours=hours)
+        else:
+            print_error(f"Invalid --since format: {args.since}. Use format like '7d' or '24h'.")
+            return 1
+
+        sessions = parser.get_sessions_since(since_time, project_path=args.project)
+        if not sessions:
+            console.print(f"No sessions modified since {since_time.strftime('%Y-%m-%d %H:%M')}.")
+            return 0
+
+        console.print(
+            f"Found [cyan]{len(sessions)}[/cyan] session(s) since "
+            f"{since_time.strftime('%Y-%m-%d %H:%M')}:\n"
+        )
+
+        total_extracted = 0
+        total_captured = 0
+
+        for session_info in sessions:
+            session_id = session_info.get("session_id", "")
+            if km.is_session_processed(session_id):
+                continue
+
+            transcript = parser.parse_session(session_id)
+            if not transcript:
+                continue
+
+            extractions = extractor.extract(transcript)
+            if not extractions:
+                continue
+
+            console.print(f"[bold]{session_info.get('first_prompt', '')[:60]}[/bold]")
+            console.print(f"  [dim]Session: {session_id[:8]}[/dim]")
+
+            for ext in extractions:
+                if ext.confidence >= args.min_confidence:
+                    total_extracted += 1
+                    confidence_text = format_score(ext.confidence)
+                    console.print("  ", end="")
+                    console.print(confidence_text, end="")
+                    console.print(f" {ext.title}")
+
+                    if args.auto:
+                        # Auto-capture the entry
+                        knowledge_id = km.capture(
+                            title=ext.title,
+                            description=ext.description,
+                            content=ext.content,
+                            tags=",".join(ext.tags),
+                            project=transcript.project_path.split("/")[-1],
+                            source="session",
+                            confidence=ext.confidence,
+                        )
+                        total_captured += 1
+                        console.print(f"    [green]Captured: {knowledge_id}[/green]")
+
+            if args.auto:
+                above_threshold = [e for e in extractions if e.confidence >= args.min_confidence]
+                km.mark_session_processed(
+                    session_id,
+                    transcript.project_path,
+                    entries_created=len(above_threshold),
+                )
+
+            console.print()
+
+        console.print(f"\nTotal: [cyan]{total_extracted}[/cyan] extractions found")
+        if args.auto:
+            console.print(f"Captured: [green]{total_captured}[/green] entries")
+        return 0
+
+    # Handle --session flag
+    if args.session:
+        session_id = args.session
+
+        # Handle --mark-processed without extraction
+        if args.mark_processed:
+            sessions = parser.list_sessions()
+            session_info = next(
+                (s for s in sessions if s.get("session_id") == session_id),
+                None,
+            )
+            if not session_info:
+                print_error(f"Session not found: {session_id}")
+                return 1
+
+            km.mark_session_processed(
+                session_id,
+                session_info.get("project_path", ""),
+                entries_created=0,
+            )
+            print_success(f"Marked session {session_id[:8]} as processed")
+            return 0
+
+        # Parse and extract from the session
+        transcript = parser.parse_session(session_id, project_path=args.project)
+        if not transcript:
+            print_error(f"Session not found or could not be parsed: {session_id}")
+            return 1
+
+        extractions = extractor.extract(transcript)
+        if not extractions:
+            console.print("No knowledge entries could be extracted from this session.")
+            if not args.preview:
+                km.mark_session_processed(session_id, transcript.project_path, entries_created=0)
+            return 0
+
+        console.print(f"Session: [dim]{session_id}[/dim]")
+        console.print(f"Project: [magenta]{transcript.project_path}[/magenta]")
+        if transcript.summary:
+            console.print(f"Summary: {transcript.summary}")
+        console.print()
+        console.print(f"Found [cyan]{len(extractions)}[/cyan] potential knowledge entries:\n")
+
+        captured_count = 0
+        for i, ext in enumerate(extractions, 1):
+            confidence_text = format_score(ext.confidence)
+            meets_threshold = ext.confidence >= args.min_confidence
+
+            console.print(f"[bold]{i}. {ext.title}[/bold]")
+            console.print("   Confidence: ", end="")
+            console.print(confidence_text)
+            console.print(f"   Type: [cyan]{ext.extraction_type}[/cyan]")
+            if ext.tags:
+                console.print(f"   Tags: [cyan]{', '.join(ext.tags)}[/cyan]")
+            console.print(f"   Description: {ext.description[:100]}...")
+            console.print()
+
+            # In preview mode, just show the extraction
+            if args.preview:
+                if len(ext.content) > 200:
+                    console.print("   Content preview:")
+                    print_code_block(ext.content[:200] + "\n...")
+                else:
+                    console.print("   Content:")
+                    print_code_block(ext.content)
+                console.print()
+                continue
+
+            # In auto mode, capture entries meeting threshold
+            if args.auto and meets_threshold:
+                knowledge_id = km.capture(
+                    title=ext.title,
+                    description=ext.description,
+                    content=ext.content,
+                    tags=",".join(ext.tags),
+                    project=transcript.project_path.split("/")[-1],
+                    source="session",
+                    confidence=ext.confidence,
+                )
+                captured_count += 1
+                console.print(f"   [green]Captured: {knowledge_id}[/green]")
+                console.print()
+
+            # In interactive mode (not preview, not auto), prompt user
+            elif not args.auto:
+                console.print("   Content preview:")
+                preview_content = ext.content[:300] if len(ext.content) > 300 else ext.content
+                print_code_block(preview_content)
+                if len(ext.content) > 300:
+                    console.print("   [dim]... (content truncated)[/dim]")
+                console.print()
+
+                # Prompt for capture
+                console.print("   Capture this entry? [y/N/q] ", end="")
+                try:
+                    response = input().strip().lower()
+                except EOFError:
+                    response = "n"
+
+                if response == "q":
+                    print_warning("Aborted.")
+                    return 0
+                elif response == "y":
+                    knowledge_id = km.capture(
+                        title=ext.title,
+                        description=ext.description,
+                        content=ext.content,
+                        tags=",".join(ext.tags),
+                        project=transcript.project_path.split("/")[-1],
+                        source="session",
+                        confidence=ext.confidence,
+                    )
+                    captured_count += 1
+                    print_success(f"Captured: {knowledge_id}")
+                console.print()
+
+        # Mark session as processed
+        if not args.preview:
+            km.mark_session_processed(
+                session_id,
+                transcript.project_path,
+                entries_created=captured_count,
+            )
+
+        if captured_count > 0:
+            print_success(f"Captured {captured_count} entries from session")
+        return 0
+
+    # No specific action - show help
+    console.print("Usage: claude-kb summarize [--list] [--session ID] [--since 7d]")
+    console.print()
+    console.print("Options:")
+    console.print("  --list              List available sessions")
+    console.print("  --session ID        Summarize a specific session")
+    console.print("  --preview           Preview without capturing")
+    console.print("  --auto              Auto-capture entries meeting threshold")
+    console.print("  --min-confidence N  Minimum confidence (default: 0.5)")
+    console.print("  --since Nd          Process sessions from last N days")
+    console.print("  --project PATH      Filter by project path")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """Main entry point for the CLI."""
     parser = create_parser()
@@ -1135,6 +1448,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_stale(args, km)
         elif args.command == "quality":
             return cmd_quality(args, km)
+        elif args.command == "summarize":
+            return cmd_summarize(args, km)
         else:
             parser.print_help()
             return 0

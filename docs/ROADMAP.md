@@ -13,10 +13,6 @@ The following features must be completed before the 1.0 release:
 
 ## Near-term
 
-### CLI Improvements
-
-- **Colored Output**: Syntax highlighting for code blocks in terminal output
-
 ### Search Enhancements
 
 - **Tag-based Filtering**: Add `--tag` filter to retrieve and list commands
@@ -70,6 +66,18 @@ The following features must be completed before the 1.0 release:
 - **Remote Storage**: Store knowledge in external databases for team sharing
 
 ## Completed
+
+### v0.7.0 (planned)
+
+- Session summarization to extract knowledge from Claude Code transcripts
+- Problem-solution detection with confidence scoring
+- Session processing tracking in database
+
+### v0.6.0
+
+- Colored terminal output with rich library
+- Syntax highlighting for code blocks
+- Color-coded scores and status messages
 
 ### v0.5.0
 

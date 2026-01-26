@@ -144,6 +144,16 @@ cat backup.json | claude-kb import -
 claude-kb import backup.json --no-skip-duplicates
 ```
 
+### Interactive Capture
+
+Use interactive mode for guided knowledge capture with an editor for content:
+
+```bash
+claude-kb capture -i
+```
+
+This prompts for each field, opens your default editor for content, and shows a preview before capturing.
+
 ### Purge Knowledge
 
 ```bash
@@ -155,6 +165,65 @@ claude-kb purge --project "myapp"
 
 # Skip confirmation prompt
 claude-kb purge --force
+```
+
+### Quality Management
+
+Monitor and improve knowledge base quality:
+
+```bash
+# Score all entries by quality (completeness, usage)
+claude-kb quality
+
+# Filter by score range
+claude-kb quality --min-score 25 --max-score 75
+
+# Find entries unused for 90+ days
+claude-kb stale --days 90
+
+# Find potential duplicates (semantic similarity)
+claude-kb duplicates --threshold 0.85
+
+# Merge duplicate entries
+claude-kb duplicates --merge <target_id> <source_id>
+```
+
+### Session Summarization
+
+Extract knowledge from Claude Code session transcripts:
+
+```bash
+# List available sessions
+claude-kb summarize --list
+
+# List sessions for a specific project
+claude-kb summarize --list --project /path/to/project
+
+# Preview knowledge extraction from a session
+claude-kb summarize --session <session-id> --preview
+
+# Interactively capture from a session
+claude-kb summarize --session <session-id>
+
+# Auto-capture entries meeting confidence threshold
+claude-kb summarize --session <session-id> --auto --min-confidence 0.7
+
+# Process sessions from the last 7 days
+claude-kb summarize --since 7d --auto
+
+# Mark session as processed without extracting
+claude-kb summarize --session <session-id> --mark-processed
+```
+
+### Shell Completions
+
+Enable tab completion for bash, zsh, or fish:
+
+```bash
+# Get setup instructions for your shell
+claude-kb completions bash
+claude-kb completions zsh
+claude-kb completions fish
 ```
 
 ### Sync Across Devices
