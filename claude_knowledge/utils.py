@@ -190,3 +190,19 @@ def sanitize_for_embedding(text: str) -> str:
     # Remove special characters that might confuse embeddings
     text = re.sub(r"[^\w\s.,!?;:\-()]", " ", text)
     return text.strip()
+
+
+def escape_like_pattern(text: str) -> str:
+    """Escape special characters for SQLite LIKE patterns.
+
+    Args:
+        text: Raw search text.
+
+    Returns:
+        Text with %, _, and \\ escaped for use in LIKE queries.
+    """
+    # Escape backslash first, then the LIKE wildcards
+    text = text.replace("\\", "\\\\")
+    text = text.replace("%", "\\%")
+    text = text.replace("_", "\\_")
+    return text

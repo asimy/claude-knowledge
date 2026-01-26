@@ -8,6 +8,7 @@ import pytest
 from claude_knowledge.knowledge_manager import KnowledgeManager
 from claude_knowledge.utils import (
     create_brief,
+    escape_like_pattern,
     estimate_tokens,
     generate_id,
     json_to_tags,
@@ -116,6 +117,14 @@ class TestUtils:
         """Test handling invalid JSON."""
         assert json_to_tags("not json") == []
         assert json_to_tags(None) == []
+
+    def test_escape_like_pattern(self):
+        """Test escaping LIKE pattern wildcards."""
+        assert escape_like_pattern("normal text") == "normal text"
+        assert escape_like_pattern("100%") == "100\\%"
+        assert escape_like_pattern("test_value") == "test\\_value"
+        assert escape_like_pattern("back\\slash") == "back\\\\slash"
+        assert escape_like_pattern("%_\\") == "\\%\\_\\\\"
 
 
 class TestKnowledgeManagerInit:
@@ -362,6 +371,47 @@ class TestSearch:
         results = populated_km.search("test", project="frontend")
         for result in results:
             assert result["project"] == "frontend"
+
+    def test_search_with_like_wildcards(self, temp_km):
+        """Test that LIKE wildcards in search text are escaped."""
+        # Create entries with specific content
+        temp_km.capture(
+            title="100% Complete",
+            description="A fully complete item",
+            content="This is 100% done",
+        )
+        temp_km.capture(
+            title="Other Entry",
+            description="Something else entirely",
+            content="No percentage here",
+        )
+
+        # Search for literal "100%" - should only match the first entry
+        results = temp_km.search("100%")
+        assert len(results) == 1
+        assert "100%" in results[0]["title"]
+
+        # Search for literal "%" - should only match entries containing %
+        results = temp_km.search("%")
+        assert len(results) == 1
+
+    def test_search_with_underscore(self, temp_km):
+        """Test that underscore wildcard is escaped in search."""
+        temp_km.capture(
+            title="test_value",
+            description="Has underscore",
+            content="Content with test_value",
+        )
+        temp_km.capture(
+            title="testXvalue",
+            description="Has X instead",
+            content="Content with testXvalue",
+        )
+
+        # Search for literal "_" should only match underscore entries
+        results = temp_km.search("test_value")
+        assert len(results) == 1
+        assert "_" in results[0]["title"]
 
 
 class TestStats:

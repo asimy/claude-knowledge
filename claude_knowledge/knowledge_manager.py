@@ -12,6 +12,7 @@ from sentence_transformers import SentenceTransformer
 from claude_knowledge.utils import (
     context_to_json,
     create_brief,
+    escape_like_pattern,
     estimate_tokens,
     format_knowledge_item,
     generate_id,
@@ -387,6 +388,9 @@ class KnowledgeManager:
 
         Returns:
             True if deleted, False if not found.
+
+        Raises:
+            Exception: If ChromaDB deletion fails for reasons other than missing ID.
         """
         # Check if exists
         cursor = self.conn.cursor()
@@ -395,10 +399,10 @@ class KnowledgeManager:
             return False
 
         # Delete from ChromaDB
-        try:
-            self.collection.delete(ids=[knowledge_id])
-        except Exception:
-            pass  # May not exist in ChromaDB
+        # ChromaDB's delete doesn't raise an error if the ID doesn't exist,
+        # so we don't need special handling for that case. Any exception here
+        # indicates a real problem that should be surfaced.
+        self.collection.delete(ids=[knowledge_id])
 
         # Delete from SQLite
         cursor.execute("DELETE FROM knowledge WHERE id = ?", (knowledge_id,))
@@ -497,14 +501,17 @@ class KnowledgeManager:
             List of matching knowledge items.
         """
         cursor = self.conn.cursor()
-        search_pattern = f"%{text}%"
+        # Escape LIKE wildcards to prevent pattern injection
+        escaped_text = escape_like_pattern(text)
+        search_pattern = f"%{escaped_text}%"
 
         if project:
             cursor.execute(
                 """
                 SELECT id, title, description, tags, usage_count, created, last_used, project
                 FROM knowledge
-                WHERE (title LIKE ? OR description LIKE ? OR content LIKE ?)
+                WHERE (title LIKE ? ESCAPE '\\' OR description LIKE ? ESCAPE '\\'
+                       OR content LIKE ? ESCAPE '\\')
                 AND project = ?
                 ORDER BY usage_count DESC, last_used DESC NULLS LAST
                 LIMIT ?
@@ -516,7 +523,8 @@ class KnowledgeManager:
                 """
                 SELECT id, title, description, tags, usage_count, created, last_used, project
                 FROM knowledge
-                WHERE title LIKE ? OR description LIKE ? OR content LIKE ?
+                WHERE title LIKE ? ESCAPE '\\' OR description LIKE ? ESCAPE '\\'
+                      OR content LIKE ? ESCAPE '\\'
                 ORDER BY usage_count DESC, last_used DESC NULLS LAST
                 LIMIT ?
                 """,
