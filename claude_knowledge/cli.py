@@ -19,7 +19,7 @@ from claude_knowledge.output import (
     print_success,
     print_warning,
 )
-from claude_knowledge.utils import json_to_tags
+from claude_knowledge.utils import json_to_tags, parse_relative_date
 
 try:
     import argcomplete
@@ -136,6 +136,32 @@ def create_parser() -> argparse.ArgumentParser:
         default=0.3,
         help="Minimum relevance score 0.0-1.0 (default: 0.3)",
     )
+    retrieve_parser.add_argument(
+        "--tag",
+        action="append",
+        dest="tags",
+        metavar="TAG",
+        help="Filter by tag (can be repeated for AND logic)",
+    )
+    retrieve_parser.add_argument(
+        "--since",
+        help="Filter entries after date (ISO format or relative: 7d, 2w, 1m)",
+    )
+    retrieve_parser.add_argument(
+        "--until",
+        help="Filter entries before date (ISO format or relative: 7d, 2w, 1m)",
+    )
+    retrieve_parser.add_argument(
+        "--date-field",
+        choices=["created", "last_used"],
+        default="created",
+        help="Date field to filter on (default: created)",
+    )
+    retrieve_parser.add_argument(
+        "--fuzzy",
+        action="store_true",
+        help="Enable fuzzy tag matching (matches with minor typos)",
+    )
 
     # list command
     list_parser = subparsers.add_parser(
@@ -159,6 +185,32 @@ def create_parser() -> argparse.ArgumentParser:
         choices=["text", "json"],
         default="text",
         help="Output format (default: text)",
+    )
+    list_parser.add_argument(
+        "--tag",
+        action="append",
+        dest="tags",
+        metavar="TAG",
+        help="Filter by tag (can be repeated for AND logic)",
+    )
+    list_parser.add_argument(
+        "--since",
+        help="Filter entries after date (ISO format or relative: 7d, 2w, 1m)",
+    )
+    list_parser.add_argument(
+        "--until",
+        help="Filter entries before date (ISO format or relative: 7d, 2w, 1m)",
+    )
+    list_parser.add_argument(
+        "--date-field",
+        choices=["created", "last_used"],
+        default="created",
+        help="Date field to filter on (default: created)",
+    )
+    list_parser.add_argument(
+        "--fuzzy",
+        action="store_true",
+        help="Enable fuzzy tag matching (matches with minor typos)",
     )
 
     # delete command
@@ -199,6 +251,32 @@ def create_parser() -> argparse.ArgumentParser:
         choices=["text", "json"],
         default="text",
         help="Output format (default: text)",
+    )
+    search_parser.add_argument(
+        "--tag",
+        action="append",
+        dest="tags",
+        metavar="TAG",
+        help="Filter by tag (can be repeated for AND logic)",
+    )
+    search_parser.add_argument(
+        "--since",
+        help="Filter entries after date (ISO format or relative: 7d, 2w, 1m)",
+    )
+    search_parser.add_argument(
+        "--until",
+        help="Filter entries before date (ISO format or relative: 7d, 2w, 1m)",
+    )
+    search_parser.add_argument(
+        "--date-field",
+        choices=["created", "last_used"],
+        default="created",
+        help="Date field to filter on (default: created)",
+    )
+    search_parser.add_argument(
+        "--fuzzy",
+        action="store_true",
+        help="Enable fuzzy tag matching (matches with minor typos)",
     )
 
     # stats command
@@ -667,12 +745,21 @@ def cmd_capture_interactive(args: argparse.Namespace, km: KnowledgeManager) -> i
 
 def cmd_retrieve(args: argparse.Namespace, km: KnowledgeManager) -> int:
     """Handle the retrieve command."""
+    # Parse date filters
+    since = parse_relative_date(args.since) if args.since else None
+    until = parse_relative_date(args.until) if args.until else None
+
     items = km.retrieve(
         query=args.query,
         n_results=args.limit,
         token_budget=args.budget,
         project=args.project,
         min_score=args.min_score,
+        tags=args.tags,
+        since=since,
+        until=until,
+        date_field=args.date_field,
+        fuzzy=args.fuzzy,
     )
 
     if not items:
@@ -706,7 +793,19 @@ def cmd_retrieve(args: argparse.Namespace, km: KnowledgeManager) -> int:
 
 def cmd_list(args: argparse.Namespace, km: KnowledgeManager) -> int:
     """Handle the list command."""
-    items = km.list_all(project=args.project, limit=args.limit)
+    # Parse date filters
+    since = parse_relative_date(args.since) if args.since else None
+    until = parse_relative_date(args.until) if args.until else None
+
+    items = km.list_all(
+        project=args.project,
+        limit=args.limit,
+        tags=args.tags,
+        since=since,
+        until=until,
+        date_field=args.date_field,
+        fuzzy=args.fuzzy,
+    )
 
     if not items:
         console.print("No knowledge entries found.")
@@ -743,7 +842,20 @@ def cmd_delete(args: argparse.Namespace, km: KnowledgeManager) -> int:
 
 def cmd_search(args: argparse.Namespace, km: KnowledgeManager) -> int:
     """Handle the search command."""
-    items = km.search(args.text, project=args.project, limit=args.limit)
+    # Parse date filters
+    since = parse_relative_date(args.since) if args.since else None
+    until = parse_relative_date(args.until) if args.until else None
+
+    items = km.search(
+        args.text,
+        project=args.project,
+        limit=args.limit,
+        tags=args.tags,
+        since=since,
+        until=until,
+        date_field=args.date_field,
+        fuzzy=args.fuzzy,
+    )
 
     if not items:
         console.print("No matching entries found.")

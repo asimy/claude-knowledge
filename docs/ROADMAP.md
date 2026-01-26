@@ -6,18 +6,10 @@ This document outlines potential future directions for the Claude Knowledge Mana
 
 The following features must be completed before the 1.0 release:
 
-- [ ] **All Near-term items** (Knowledge Quality, CLI Improvements, Search Enhancements)
 - [ ] **Knowledge Relationships** (Linking, Collections, Dependency Tracking)
 - [ ] **Versioning** (Entry History, Rollback, Diff View)
 - [x] **Automatic Knowledge Extraction** (Code Analysis, Session Summarization, Documentation Mining)
-
-## Near-term
-
-### Search Enhancements
-
-- **Tag-based Filtering**: Add `--tag` filter to retrieve and list commands
-- **Date Range Filtering**: Filter by creation or last-used date
-- **Fuzzy Tag Matching**: Match tags with minor typos or variations
+- [x] **Search Enhancements** (Tag Filtering, Date Filtering, Fuzzy Matching)
 
 ## Medium-term
 
@@ -59,6 +51,16 @@ The following features must be completed before the 1.0 release:
 - **Remote Storage**: Store knowledge in external databases for team sharing
 
 ## Completed
+
+### v0.9.0
+
+- Search enhancements with tag, date, and fuzzy filtering
+- Tag-based filtering with `--tag` flag (supports multiple tags with AND logic)
+- Date range filtering with `--since` and `--until` flags
+- Relative date support (7d, 2w, 1m, 1y)
+- Date field selection with `--date-field` (created or last_used)
+- Fuzzy tag matching with `--fuzzy` flag (Levenshtein distance <= 2)
+- Applied to `retrieve`, `list`, and `search` commands
 
 ### v0.8.0
 

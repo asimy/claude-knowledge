@@ -18,6 +18,7 @@ from claude_knowledge.utils import (
     escape_like_pattern,
     estimate_tokens,
     format_knowledge_item,
+    fuzzy_match_tags,
     generate_id,
     get_machine_id,
     json_to_context,
@@ -358,6 +359,11 @@ class KnowledgeManager:
         token_budget: int = 2000,
         project: str | None = None,
         min_score: float = 0.3,
+        tags: list[str] | None = None,
+        since: str | None = None,
+        until: str | None = None,
+        date_field: str = "created",
+        fuzzy: bool = False,
     ) -> list[dict[str, Any]]:
         """Retrieve relevant knowledge based on query.
 
@@ -367,6 +373,11 @@ class KnowledgeManager:
             token_budget: Maximum total tokens for returned content.
             project: Optional project filter.
             min_score: Minimum relevance score (0.0 to 1.0).
+            tags: Optional list of tags to filter by (AND logic).
+            since: Optional start date (ISO format) for date filtering.
+            until: Optional end date (ISO format) for date filtering.
+            date_field: Field to use for date filtering ("created" or "last_used").
+            fuzzy: Enable fuzzy tag matching (edit distance <= 2).
 
         Returns:
             List of knowledge items with metadata and scores.
@@ -411,6 +422,25 @@ class KnowledgeManager:
             if row:
                 item = dict(row)
                 item["score"] = score
+
+                # Apply tag filter
+                if tags:
+                    item_tags = json_to_tags(item.get("tags"))
+                    if fuzzy:
+                        if not fuzzy_match_tags(tags, item_tags):
+                            continue
+                    elif not all(tag in item_tags for tag in tags):
+                        continue
+
+                # Apply date filter
+                if since or until:
+                    date_value = item.get(date_field)
+                    if date_value:
+                        if since and date_value < since:
+                            continue
+                        if until and date_value > until:
+                            continue
+
                 items.append(item)
 
         # Sort by score
@@ -480,42 +510,75 @@ class KnowledgeManager:
         self,
         project: str | None = None,
         limit: int = 50,
+        tags: list[str] | None = None,
+        since: str | None = None,
+        until: str | None = None,
+        date_field: str = "created",
+        fuzzy: bool = False,
     ) -> list[dict[str, Any]]:
         """List all knowledge entries.
 
         Args:
             project: Optional project filter.
             limit: Maximum number of results.
+            tags: Optional list of tags to filter by (AND logic).
+            since: Optional start date (ISO format) for date filtering.
+            until: Optional end date (ISO format) for date filtering.
+            date_field: Field to use for date filtering ("created" or "last_used").
+            fuzzy: Enable fuzzy tag matching (edit distance <= 2).
 
         Returns:
             List of knowledge items with basic metadata.
         """
         cursor = self.conn.cursor()
 
-        if project:
-            cursor.execute(
-                """
-                SELECT id, title, description, tags, usage_count, created, last_used, project
-                FROM knowledge
-                WHERE project = ?
-                ORDER BY last_used DESC NULLS LAST, created DESC
-                LIMIT ?
-                """,
-                (project, limit),
-            )
-        else:
-            cursor.execute(
-                """
-                SELECT id, title, description, tags, usage_count, created, last_used, project
-                FROM knowledge
-                ORDER BY last_used DESC NULLS LAST, created DESC
-                LIMIT ?
-                """,
-                (limit,),
-            )
+        # Build query dynamically based on filters
+        query = """
+            SELECT id, title, description, tags, usage_count, created, last_used, project
+            FROM knowledge
+            WHERE 1=1
+        """
+        params: list[str | int] = []
 
+        if project:
+            query += " AND project = ?"
+            params.append(project)
+
+        if since:
+            query += f" AND {date_field} >= ?"
+            params.append(since)
+
+        if until:
+            query += f" AND {date_field} <= ?"
+            params.append(until)
+
+        query += " ORDER BY last_used DESC NULLS LAST, created DESC"
+
+        # Fetch more results if we need to filter by tags (post-query)
+        fetch_limit = limit * 3 if tags else limit
+        query += " LIMIT ?"
+        params.append(fetch_limit)
+
+        cursor.execute(query, params)
         rows = cursor.fetchall()
-        return [dict(row) for row in rows]
+        items = [dict(row) for row in rows]
+
+        # Apply tag filter (requires JSON parsing)
+        if tags:
+            filtered = []
+            for item in items:
+                item_tags = json_to_tags(item.get("tags"))
+                if fuzzy:
+                    matches = fuzzy_match_tags(tags, item_tags)
+                else:
+                    matches = all(tag in item_tags for tag in tags)
+                if matches:
+                    filtered.append(item)
+                    if len(filtered) >= limit:
+                        break
+            return filtered
+
+        return items[:limit]
 
     def get(self, knowledge_id: str) -> dict[str, Any] | None:
         """Get a single knowledge entry by ID.
@@ -643,6 +706,11 @@ class KnowledgeManager:
         text: str,
         project: str | None = None,
         limit: int = 20,
+        tags: list[str] | None = None,
+        since: str | None = None,
+        until: str | None = None,
+        date_field: str = "created",
+        fuzzy: bool = False,
     ) -> list[dict[str, Any]]:
         """Text search in titles and descriptions.
 
@@ -650,6 +718,11 @@ class KnowledgeManager:
             text: Search text.
             project: Optional project filter.
             limit: Maximum results.
+            tags: Optional list of tags to filter by (AND logic).
+            since: Optional start date (ISO format) for date filtering.
+            until: Optional end date (ISO format) for date filtering.
+            date_field: Field to use for date filtering ("created" or "last_used").
+            fuzzy: Enable fuzzy tag matching (edit distance <= 2).
 
         Returns:
             List of matching knowledge items.
@@ -659,34 +732,54 @@ class KnowledgeManager:
         escaped_text = escape_like_pattern(text)
         search_pattern = f"%{escaped_text}%"
 
-        if project:
-            cursor.execute(
-                """
-                SELECT id, title, description, tags, usage_count, created, last_used, project
-                FROM knowledge
-                WHERE (title LIKE ? ESCAPE '\\' OR description LIKE ? ESCAPE '\\'
-                       OR content LIKE ? ESCAPE '\\')
-                AND project = ?
-                ORDER BY usage_count DESC, last_used DESC NULLS LAST
-                LIMIT ?
-                """,
-                (search_pattern, search_pattern, search_pattern, project, limit),
-            )
-        else:
-            cursor.execute(
-                """
-                SELECT id, title, description, tags, usage_count, created, last_used, project
-                FROM knowledge
-                WHERE title LIKE ? ESCAPE '\\' OR description LIKE ? ESCAPE '\\'
-                      OR content LIKE ? ESCAPE '\\'
-                ORDER BY usage_count DESC, last_used DESC NULLS LAST
-                LIMIT ?
-                """,
-                (search_pattern, search_pattern, search_pattern, limit),
-            )
+        # Build query dynamically
+        query = """
+            SELECT id, title, description, tags, usage_count, created, last_used, project
+            FROM knowledge
+            WHERE (title LIKE ? ESCAPE '\\' OR description LIKE ? ESCAPE '\\'
+                   OR content LIKE ? ESCAPE '\\')
+        """
+        params: list[str | int] = [search_pattern, search_pattern, search_pattern]
 
+        if project:
+            query += " AND project = ?"
+            params.append(project)
+
+        if since:
+            query += f" AND {date_field} >= ?"
+            params.append(since)
+
+        if until:
+            query += f" AND {date_field} <= ?"
+            params.append(until)
+
+        query += " ORDER BY usage_count DESC, last_used DESC NULLS LAST"
+
+        # Fetch more results if we need to filter by tags (post-query)
+        fetch_limit = limit * 3 if tags else limit
+        query += " LIMIT ?"
+        params.append(fetch_limit)
+
+        cursor.execute(query, params)
         rows = cursor.fetchall()
-        return [dict(row) for row in rows]
+        items = [dict(row) for row in rows]
+
+        # Apply tag filter (requires JSON parsing)
+        if tags:
+            filtered = []
+            for item in items:
+                item_tags = json_to_tags(item.get("tags"))
+                if fuzzy:
+                    matches = fuzzy_match_tags(tags, item_tags)
+                else:
+                    matches = all(tag in item_tags for tag in tags)
+                if matches:
+                    filtered.append(item)
+                    if len(filtered) >= limit:
+                        break
+            return filtered
+
+        return items[:limit]
 
     def get_distinct_projects(self) -> list[str]:
         """Get list of distinct project names.

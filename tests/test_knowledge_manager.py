@@ -910,3 +910,249 @@ class TestQualityScoring:
         scored_a = temp_km.score_quality(project="project-a")
         assert len(scored_a) == 1
         assert "Project A" in scored_a[0]["title"]
+
+
+class TestTagFiltering:
+    """Tests for tag-based filtering."""
+
+    def test_list_all_with_tags(self, temp_km):
+        """Test list_all filters by tags."""
+        temp_km.capture(
+            title="Python Entry",
+            description="Python code",
+            content="Content",
+            tags=["python", "api"],
+        )
+        temp_km.capture(
+            title="JavaScript Entry",
+            description="JS code",
+            content="Content",
+            tags=["javascript", "api"],
+        )
+        temp_km.capture(
+            title="Go Entry",
+            description="Go code",
+            content="Content",
+            tags=["go", "cli"],
+        )
+
+        # Filter by single tag
+        python_entries = temp_km.list_all(tags=["python"])
+        assert len(python_entries) == 1
+        assert "Python" in python_entries[0]["title"]
+
+        # Filter by multiple tags (AND logic)
+        api_entries = temp_km.list_all(tags=["api"])
+        assert len(api_entries) == 2
+
+        python_api_entries = temp_km.list_all(tags=["python", "api"])
+        assert len(python_api_entries) == 1
+
+    def test_search_with_tags(self, temp_km):
+        """Test search filters by tags."""
+        temp_km.capture(
+            title="Database Query",
+            description="SQL query optimization",
+            content="Content",
+            tags=["sql", "database"],
+        )
+        temp_km.capture(
+            title="Database Schema",
+            description="SQL schema design",
+            content="Content",
+            tags=["sql", "schema"],
+        )
+
+        # Search with tag filter
+        results = temp_km.search("Database", tags=["schema"])
+        assert len(results) == 1
+        assert "Schema" in results[0]["title"]
+
+
+class TestDateFiltering:
+    """Tests for date range filtering."""
+
+    def test_list_all_with_since(self, temp_km):
+        """Test list_all filters by since date."""
+        from datetime import datetime, timedelta
+
+        # Capture an entry
+        temp_km.capture(
+            title="Recent Entry",
+            description="Recent",
+            content="Content",
+        )
+
+        # Filter by future date (should return nothing)
+        future = (datetime.now() + timedelta(days=1)).isoformat()
+        entries = temp_km.list_all(since=future)
+        assert len(entries) == 0
+
+        # Filter by past date (should return the entry)
+        past = (datetime.now() - timedelta(days=1)).isoformat()
+        entries = temp_km.list_all(since=past)
+        assert len(entries) == 1
+
+    def test_list_all_with_until(self, temp_km):
+        """Test list_all filters by until date."""
+        from datetime import datetime, timedelta
+
+        temp_km.capture(
+            title="Entry",
+            description="Description",
+            content="Content",
+        )
+
+        # Filter by past date (should return nothing)
+        past = (datetime.now() - timedelta(days=1)).isoformat()
+        entries = temp_km.list_all(until=past)
+        assert len(entries) == 0
+
+        # Filter by future date (should return the entry)
+        future = (datetime.now() + timedelta(days=1)).isoformat()
+        entries = temp_km.list_all(until=future)
+        assert len(entries) == 1
+
+
+class TestFuzzyTagMatching:
+    """Tests for fuzzy tag matching."""
+
+    def test_fuzzy_match_exact(self, temp_km):
+        """Test exact match still works with fuzzy enabled."""
+        temp_km.capture(
+            title="Python Entry",
+            description="Python code",
+            content="Content",
+            tags=["python"],
+        )
+
+        entries = temp_km.list_all(tags=["python"], fuzzy=True)
+        assert len(entries) == 1
+
+    def test_fuzzy_match_typo(self, temp_km):
+        """Test fuzzy matching with typos."""
+        temp_km.capture(
+            title="Python Entry",
+            description="Python code",
+            content="Content",
+            tags=["python"],
+        )
+
+        # "pythn" has edit distance 1 from "python"
+        entries = temp_km.list_all(tags=["pythn"], fuzzy=True)
+        assert len(entries) == 1
+
+        # Without fuzzy, should not match
+        entries = temp_km.list_all(tags=["pythn"], fuzzy=False)
+        assert len(entries) == 0
+
+    def test_fuzzy_match_multiple_tags(self, temp_km):
+        """Test fuzzy matching with multiple tags."""
+        temp_km.capture(
+            title="Web API",
+            description="REST API",
+            content="Content",
+            tags=["javascript", "api"],
+        )
+
+        # Both tags must fuzzy-match
+        entries = temp_km.list_all(tags=["javascrpt", "api"], fuzzy=True)
+        assert len(entries) == 1
+
+        # One tag too different (edit distance > 2)
+        # "jvscrpt" has distance 3 from "javascript"
+        entries = temp_km.list_all(tags=["jvscrpt", "api"], fuzzy=True)
+        assert len(entries) == 0
+
+
+class TestRelativeDateParsing:
+    """Tests for relative date parsing utility."""
+
+    def test_parse_relative_date_days(self):
+        """Test parsing days."""
+        from datetime import datetime, timedelta
+
+        from claude_knowledge.utils import parse_relative_date
+
+        result = parse_relative_date("7d")
+        assert result is not None
+        parsed = datetime.fromisoformat(result)
+        expected = datetime.now() - timedelta(days=7)
+        # Allow 1 second tolerance
+        assert abs((parsed - expected).total_seconds()) < 1
+
+    def test_parse_relative_date_weeks(self):
+        """Test parsing weeks."""
+        from datetime import datetime, timedelta
+
+        from claude_knowledge.utils import parse_relative_date
+
+        result = parse_relative_date("2w")
+        assert result is not None
+        parsed = datetime.fromisoformat(result)
+        expected = datetime.now() - timedelta(weeks=2)
+        assert abs((parsed - expected).total_seconds()) < 1
+
+    def test_parse_relative_date_months(self):
+        """Test parsing months."""
+        from datetime import datetime, timedelta
+
+        from claude_knowledge.utils import parse_relative_date
+
+        result = parse_relative_date("1m")
+        assert result is not None
+        parsed = datetime.fromisoformat(result)
+        expected = datetime.now() - timedelta(days=30)
+        assert abs((parsed - expected).total_seconds()) < 1
+
+    def test_parse_relative_date_iso(self):
+        """Test parsing ISO format dates."""
+        from claude_knowledge.utils import parse_relative_date
+
+        iso_date = "2026-01-15T10:30:00"
+        result = parse_relative_date(iso_date)
+        assert result == iso_date
+
+    def test_parse_relative_date_invalid(self):
+        """Test parsing invalid dates."""
+        from claude_knowledge.utils import parse_relative_date
+
+        assert parse_relative_date("invalid") is None
+        assert parse_relative_date("") is None
+
+
+class TestLevenshteinDistance:
+    """Tests for Levenshtein distance utility."""
+
+    def test_levenshtein_identical(self):
+        """Test identical strings have distance 0."""
+        from claude_knowledge.utils import levenshtein_distance
+
+        assert levenshtein_distance("python", "python") == 0
+
+    def test_levenshtein_single_edit(self):
+        """Test single character edits."""
+        from claude_knowledge.utils import levenshtein_distance
+
+        # Deletion
+        assert levenshtein_distance("python", "pythn") == 1
+        # Insertion
+        assert levenshtein_distance("pythn", "python") == 1
+        # Substitution
+        assert levenshtein_distance("python", "pithon") == 1
+
+    def test_levenshtein_multiple_edits(self):
+        """Test multiple character edits."""
+        from claude_knowledge.utils import levenshtein_distance
+
+        assert levenshtein_distance("python", "pyton") == 1
+        assert levenshtein_distance("python", "pthn") == 2
+        assert levenshtein_distance("kitten", "sitting") == 3
+
+    def test_levenshtein_empty_string(self):
+        """Test with empty strings."""
+        from claude_knowledge.utils import levenshtein_distance
+
+        assert levenshtein_distance("", "") == 0
+        assert levenshtein_distance("python", "") == 6
+        assert levenshtein_distance("", "python") == 6

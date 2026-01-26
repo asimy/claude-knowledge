@@ -4,8 +4,120 @@ import hashlib
 import json
 import re
 import socket
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
+
+
+def levenshtein_distance(s1: str, s2: str) -> int:
+    """Calculate the Levenshtein (edit) distance between two strings.
+
+    Args:
+        s1: First string.
+        s2: Second string.
+
+    Returns:
+        The minimum number of single-character edits needed to transform s1 into s2.
+    """
+    if len(s1) < len(s2):
+        return levenshtein_distance(s2, s1)
+
+    if len(s2) == 0:
+        return len(s1)
+
+    previous_row = range(len(s2) + 1)
+    for i, c1 in enumerate(s1):
+        current_row = [i + 1]
+        for j, c2 in enumerate(s2):
+            # Cost is 0 if characters match, 1 otherwise
+            insertions = previous_row[j + 1] + 1
+            deletions = current_row[j] + 1
+            substitutions = previous_row[j] + (c1 != c2)
+            current_row.append(min(insertions, deletions, substitutions))
+        previous_row = current_row
+
+    return previous_row[-1]
+
+
+def fuzzy_match_tag(query_tag: str, item_tags: list[str], max_distance: int = 2) -> bool:
+    """Check if a query tag fuzzy-matches any item tag.
+
+    Args:
+        query_tag: The tag to search for.
+        item_tags: List of tags to match against.
+        max_distance: Maximum edit distance for a match (default: 2).
+
+    Returns:
+        True if query_tag matches any item tag within the edit distance.
+    """
+    query_lower = query_tag.lower()
+    for tag in item_tags:
+        tag_lower = tag.lower()
+        # Exact match
+        if query_lower == tag_lower:
+            return True
+        # Fuzzy match with edit distance
+        if levenshtein_distance(query_lower, tag_lower) <= max_distance:
+            return True
+    return False
+
+
+def fuzzy_match_tags(
+    query_tags: list[str], item_tags: list[str], max_distance: int = 2
+) -> bool:
+    """Check if all query tags fuzzy-match item tags (AND logic).
+
+    Args:
+        query_tags: List of tags to search for.
+        item_tags: List of tags to match against.
+        max_distance: Maximum edit distance for a match (default: 2).
+
+    Returns:
+        True if all query tags match within the edit distance.
+    """
+    return all(fuzzy_match_tag(qt, item_tags, max_distance) for qt in query_tags)
+
+
+def parse_relative_date(date_str: str) -> str | None:
+    """Parse a date string that can be ISO format or relative (e.g., '7d', '2w', '1m').
+
+    Args:
+        date_str: Date string in ISO format or relative format (7d, 2w, 1m, 1y).
+
+    Returns:
+        ISO format date string, or None if parsing fails.
+    """
+    if not date_str:
+        return None
+
+    # Try ISO format first
+    try:
+        datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+        return date_str
+    except ValueError:
+        pass
+
+    # Try relative format (7d, 2w, 1m, 1y)
+    match = re.match(r"^(\d+)([dwmy])$", date_str.lower())
+    if match:
+        amount = int(match.group(1))
+        unit = match.group(2)
+
+        now = datetime.now()
+        if unit == "d":
+            delta = timedelta(days=amount)
+        elif unit == "w":
+            delta = timedelta(weeks=amount)
+        elif unit == "m":
+            delta = timedelta(days=amount * 30)  # Approximate month
+        elif unit == "y":
+            delta = timedelta(days=amount * 365)  # Approximate year
+        else:
+            return None
+
+        result = now - delta
+        return result.isoformat()
+
+    return None
 
 
 def generate_id(title: str, timestamp: datetime | None = None) -> str:
