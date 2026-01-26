@@ -7,6 +7,13 @@ import sys
 from claude_knowledge.knowledge_manager import KnowledgeManager
 from claude_knowledge.utils import json_to_tags
 
+try:
+    import argcomplete
+
+    ARGCOMPLETE_AVAILABLE = True
+except ImportError:
+    ARGCOMPLETE_AVAILABLE = False
+
 
 def create_parser() -> argparse.ArgumentParser:
     """Create the argument parser for the CLI."""
@@ -15,6 +22,22 @@ def create_parser() -> argparse.ArgumentParser:
         description="Knowledge management system for Claude Code",
     )
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
+
+    # Import completers if argcomplete is available
+    project_completer = None
+    entry_id_completer = None
+    sync_path_completer = None
+
+    if ARGCOMPLETE_AVAILABLE:
+        from claude_knowledge.completions import (
+            get_entry_id_completer,
+            get_project_completer,
+            get_sync_path_completer,
+        )
+
+        project_completer = get_project_completer()
+        entry_id_completer = get_entry_id_completer()
+        sync_path_completer = get_sync_path_completer()
 
     # capture command
     capture_parser = subparsers.add_parser(
@@ -44,10 +67,12 @@ def create_parser() -> argparse.ArgumentParser:
         "--context",
         help="Comma-separated context (e.g., 'backend,python')",
     )
-    capture_parser.add_argument(
+    capture_project = capture_parser.add_argument(
         "--project",
         help="Project name/identifier",
     )
+    if project_completer:
+        capture_project.completer = project_completer
 
     # retrieve command
     retrieve_parser = subparsers.add_parser(
@@ -59,10 +84,12 @@ def create_parser() -> argparse.ArgumentParser:
         required=True,
         help="Search query text",
     )
-    retrieve_parser.add_argument(
+    retrieve_project = retrieve_parser.add_argument(
         "--project",
         help="Filter by project",
     )
+    if project_completer:
+        retrieve_project.completer = project_completer
     retrieve_parser.add_argument(
         "--limit",
         type=int,
@@ -93,10 +120,12 @@ def create_parser() -> argparse.ArgumentParser:
         "list",
         help="List knowledge entries",
     )
-    list_parser.add_argument(
+    list_project = list_parser.add_argument(
         "--project",
         help="Filter by project",
     )
+    if project_completer:
+        list_project.completer = project_completer
     list_parser.add_argument(
         "--limit",
         type=int,
@@ -115,10 +144,12 @@ def create_parser() -> argparse.ArgumentParser:
         "delete",
         help="Delete a knowledge entry",
     )
-    delete_parser.add_argument(
+    delete_id = delete_parser.add_argument(
         "id",
         help="Knowledge entry ID to delete",
     )
+    if entry_id_completer:
+        delete_id.completer = entry_id_completer
 
     # search command
     search_parser = subparsers.add_parser(
@@ -129,10 +160,12 @@ def create_parser() -> argparse.ArgumentParser:
         "text",
         help="Search text",
     )
-    search_parser.add_argument(
+    search_project = search_parser.add_argument(
         "--project",
         help="Filter by project",
     )
+    if project_completer:
+        search_project.completer = project_completer
     search_parser.add_argument(
         "--limit",
         type=int,
@@ -157,10 +190,12 @@ def create_parser() -> argparse.ArgumentParser:
         "get",
         help="Get a specific knowledge entry",
     )
-    get_parser.add_argument(
+    get_id = get_parser.add_argument(
         "id",
         help="Knowledge entry ID",
     )
+    if entry_id_completer:
+        get_id.completer = entry_id_completer
     get_parser.add_argument(
         "--format",
         choices=["text", "json", "markdown"],
@@ -173,10 +208,12 @@ def create_parser() -> argparse.ArgumentParser:
         "update",
         help="Update a knowledge entry",
     )
-    update_parser.add_argument(
+    update_id = update_parser.add_argument(
         "id",
         help="Knowledge entry ID to update",
     )
+    if entry_id_completer:
+        update_id.completer = entry_id_completer
     update_parser.add_argument(
         "--title",
         help="New title",
@@ -193,10 +230,12 @@ def create_parser() -> argparse.ArgumentParser:
         "--tags",
         help="New tags (comma-separated)",
     )
-    update_parser.add_argument(
+    update_project = update_parser.add_argument(
         "--project",
         help="New project",
     )
+    if project_completer:
+        update_project.completer = project_completer
 
     # export command
     export_parser = subparsers.add_parser(
@@ -207,10 +246,12 @@ def create_parser() -> argparse.ArgumentParser:
         "file",
         help="Output file path (use - for stdout)",
     )
-    export_parser.add_argument(
+    export_project = export_parser.add_argument(
         "--project",
         help="Only export entries for this project",
     )
+    if project_completer:
+        export_project.completer = project_completer
 
     # import command
     import_parser = subparsers.add_parser(
@@ -232,10 +273,12 @@ def create_parser() -> argparse.ArgumentParser:
         "purge",
         help="Delete all knowledge entries",
     )
-    purge_parser.add_argument(
+    purge_project = purge_parser.add_argument(
         "--project",
         help="Only purge entries for this project",
     )
+    if project_completer:
+        purge_project.completer = project_completer
     purge_parser.add_argument(
         "--force",
         action="store_true",
@@ -247,11 +290,13 @@ def create_parser() -> argparse.ArgumentParser:
         "sync",
         help="Sync knowledge with a directory",
     )
-    sync_parser.add_argument(
+    sync_path = sync_parser.add_argument(
         "path",
         nargs="?",
         help="Path to sync directory (uses saved path if omitted)",
     )
+    if sync_path_completer:
+        sync_path.completer = sync_path_completer
     sync_parser.add_argument(
         "--push-only",
         action="store_true",
@@ -283,10 +328,12 @@ def create_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Show sync status without syncing",
     )
-    sync_parser.add_argument(
+    sync_project = sync_parser.add_argument(
         "--project",
         help="Only sync entries for this project",
     )
+    if project_completer:
+        sync_project.completer = project_completer
 
     # duplicates command
     duplicates_parser = subparsers.add_parser(
@@ -299,16 +346,20 @@ def create_parser() -> argparse.ArgumentParser:
         default=0.85,
         help="Similarity threshold 0.0-1.0 (default: 0.85)",
     )
-    duplicates_parser.add_argument(
+    duplicates_project = duplicates_parser.add_argument(
         "--project",
         help="Only check entries for this project",
     )
-    duplicates_parser.add_argument(
+    if project_completer:
+        duplicates_project.completer = project_completer
+    duplicates_merge = duplicates_parser.add_argument(
         "--merge",
         nargs=2,
         metavar=("TARGET_ID", "SOURCE_ID"),
         help="Merge SOURCE_ID into TARGET_ID",
     )
+    if entry_id_completer:
+        duplicates_merge.completer = entry_id_completer
 
     # stale command
     stale_parser = subparsers.add_parser(
@@ -321,10 +372,12 @@ def create_parser() -> argparse.ArgumentParser:
         default=90,
         help="Days of inactivity to consider stale (default: 90)",
     )
-    stale_parser.add_argument(
+    stale_project = stale_parser.add_argument(
         "--project",
         help="Only check entries for this project",
     )
+    if project_completer:
+        stale_project.completer = project_completer
     stale_parser.add_argument(
         "--format",
         choices=["text", "json"],
@@ -337,10 +390,12 @@ def create_parser() -> argparse.ArgumentParser:
         "quality",
         help="Score entries by quality metrics",
     )
-    quality_parser.add_argument(
+    quality_project = quality_parser.add_argument(
         "--project",
         help="Only check entries for this project",
     )
+    if project_completer:
+        quality_project.completer = project_completer
     quality_parser.add_argument(
         "--min-score",
         type=float,
@@ -356,6 +411,17 @@ def create_parser() -> argparse.ArgumentParser:
         choices=["text", "json"],
         default="text",
         help="Output format (default: text)",
+    )
+
+    # completions command
+    completions_parser = subparsers.add_parser(
+        "completions",
+        help="Generate shell completion setup instructions",
+    )
+    completions_parser.add_argument(
+        "shell",
+        choices=["bash", "zsh", "fish"],
+        help="Shell to generate completions for",
     )
 
     return parser
@@ -870,14 +936,50 @@ def cmd_quality(args: argparse.Namespace, km: KnowledgeManager) -> int:
     return 0
 
 
+def cmd_completions(args: argparse.Namespace) -> int:
+    """Handle the completions command."""
+    if not ARGCOMPLETE_AVAILABLE:
+        print("Error: argcomplete is not installed.")
+        print("Install with: pip install 'claude-knowledge[completions]'")
+        return 1
+
+    shell = args.shell
+
+    if shell == "bash":
+        print("""# Add this to your ~/.bashrc:
+eval "$(register-python-argcomplete claude-kb)"
+""")
+    elif shell == "zsh":
+        print("""# Add this to your ~/.zshrc:
+autoload -U bashcompinit
+bashcompinit
+eval "$(register-python-argcomplete claude-kb)"
+""")
+    elif shell == "fish":
+        print("""# Run this command once:
+register-python-argcomplete --shell fish claude-kb > ~/.config/fish/completions/claude-kb.fish
+""")
+
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """Main entry point for the CLI."""
     parser = create_parser()
+
+    # Enable argcomplete if available
+    if ARGCOMPLETE_AVAILABLE:
+        argcomplete.autocomplete(parser)
+
     args = parser.parse_args(argv)
 
     if not args.command:
         parser.print_help()
         return 0
+
+    # Handle completions command separately (doesn't need KnowledgeManager)
+    if args.command == "completions":
+        return cmd_completions(args)
 
     try:
         km = KnowledgeManager()

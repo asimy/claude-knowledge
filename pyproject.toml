@@ -13,11 +13,13 @@ dependencies = [
 claude-kb = "claude_knowledge.cli:main"
 
 [project.optional-dependencies]
+completions = ["argcomplete>=3.0.0"]
 dev = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
     "ruff>=0.8.0",
     "ty>=0.0.1a7",
+    "argcomplete>=3.0.0",
 ]
 
 [build-system]
