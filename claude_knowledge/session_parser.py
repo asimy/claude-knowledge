@@ -81,20 +81,71 @@ class SessionTranscript:
     def get_conversation_pairs(self) -> list[tuple[SessionMessage, SessionMessage]]:
         """Get user-assistant message pairs in order.
 
+        Assistant responses may span multiple JSONL entries (streaming).
+        This method aggregates chained assistant messages into a single
+        response with combined content.
+
         Returns:
-            List of (user_message, assistant_message) tuples.
+            List of (user_message, aggregated_assistant_message) tuples.
         """
         pairs = []
-        user_messages = [m for m in self.messages if m.role == "user"]
-        assistant_messages = [m for m in self.messages if m.role == "assistant"]
 
-        # Match based on parent_uuid relationship or sequential order
-        for user_msg in user_messages:
-            # Find assistant response that follows this user message
-            for asst_msg in assistant_messages:
-                if asst_msg.parent_uuid == user_msg.uuid:
-                    pairs.append((user_msg, asst_msg))
-                    break
+        # Build a map of parent_uuid -> children
+        children_by_parent: dict[str, list[SessionMessage]] = {}
+        for msg in self.messages:
+            if msg.parent_uuid:
+                if msg.parent_uuid not in children_by_parent:
+                    children_by_parent[msg.parent_uuid] = []
+                children_by_parent[msg.parent_uuid].append(msg)
+
+        # Find user messages and aggregate their assistant response chains
+        for msg in self.messages:
+            if msg.role != "user":
+                continue
+
+            # Find all assistant messages in the chain following this user message
+            assistant_content: list[dict[str, Any]] = []
+            assistant_uuids: list[str] = []
+            latest_timestamp = msg.timestamp
+
+            # BFS to collect all chained assistant messages
+            queue = [msg.uuid]
+            visited = {msg.uuid}
+
+            while queue:
+                current_uuid = queue.pop(0)
+                children = children_by_parent.get(current_uuid, [])
+
+                for child in children:
+                    if child.uuid in visited:
+                        continue
+                    visited.add(child.uuid)
+
+                    if child.role == "assistant":
+                        # Add this assistant's content
+                        if isinstance(child.content, list):
+                            assistant_content.extend(child.content)
+                        elif isinstance(child.content, str):
+                            assistant_content.append({"type": "text", "text": child.content})
+                        assistant_uuids.append(child.uuid)
+                        if child.timestamp > latest_timestamp:
+                            latest_timestamp = child.timestamp
+                        # Continue following the chain
+                        queue.append(child.uuid)
+                    elif child.role == "user":
+                        # Stop at the next user message
+                        pass
+
+            # Create aggregated assistant message if we found any
+            if assistant_content:
+                aggregated = SessionMessage(
+                    uuid=assistant_uuids[0] if assistant_uuids else "",
+                    role="assistant",
+                    content=assistant_content,
+                    timestamp=latest_timestamp,
+                    parent_uuid=msg.uuid,
+                )
+                pairs.append((msg, aggregated))
 
         return pairs
 
