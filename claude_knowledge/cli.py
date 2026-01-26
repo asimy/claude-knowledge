@@ -45,19 +45,22 @@ def create_parser() -> argparse.ArgumentParser:
         help="Capture new knowledge",
     )
     capture_parser.add_argument(
+        "-i",
+        "--interactive",
+        action="store_true",
+        help="Interactive mode with prompts for each field",
+    )
+    capture_parser.add_argument(
         "--title",
-        required=True,
-        help="Short title for the knowledge entry",
+        help="Short title for the knowledge entry (required unless -i)",
     )
     capture_parser.add_argument(
         "--description",
-        required=True,
-        help="Description of what this knowledge covers",
+        help="Description of what this knowledge covers (required unless -i)",
     )
     capture_parser.add_argument(
         "--content",
-        required=True,
-        help="Full content/details of the knowledge",
+        help="Full content/details of the knowledge (required unless -i)",
     )
     capture_parser.add_argument(
         "--tags",
@@ -429,6 +432,23 @@ def create_parser() -> argparse.ArgumentParser:
 
 def cmd_capture(args: argparse.Namespace, km: KnowledgeManager) -> int:
     """Handle the capture command."""
+    if args.interactive:
+        return cmd_capture_interactive(args, km)
+
+    # Non-interactive mode: validate required fields
+    missing = []
+    if not args.title:
+        missing.append("--title")
+    if not args.description:
+        missing.append("--description")
+    if not args.content:
+        missing.append("--content")
+
+    if missing:
+        print(f"Error: Missing required arguments: {', '.join(missing)}")
+        print("Use -i/--interactive for interactive mode, or provide all required arguments.")
+        return 1
+
     context = None
     if args.context:
         context = [c.strip() for c in args.context.split(",") if c.strip()]
@@ -444,6 +464,68 @@ def cmd_capture(args: argparse.Namespace, km: KnowledgeManager) -> int:
 
     print(f"Knowledge captured with ID: {knowledge_id}")
     return 0
+
+
+def cmd_capture_interactive(args: argparse.Namespace, km: KnowledgeManager) -> int:
+    """Handle interactive capture mode."""
+    from claude_knowledge.interactive import (
+        prompt_editor,
+        prompt_line,
+        prompt_optional,
+        show_preview,
+    )
+
+    print("Interactive capture mode. Press Ctrl+C to cancel at any time.\n")
+
+    try:
+        # Get existing projects for suggestions
+        projects = km.get_distinct_projects()
+
+        # Prompt for required fields
+        title = prompt_line("Title: ", required=True)
+        description = prompt_line("Description: ", required=True)
+
+        # Open editor for content
+        print("Opening editor for content...")
+        content = prompt_editor()
+
+        if not content:
+            print("Error: Content cannot be empty.")
+            return 1
+
+        # Optional fields
+        tags = prompt_optional("Tags (comma-separated, optional): ")
+        project = prompt_optional("Project (optional): ", suggestions=projects)
+
+        # Show preview and confirm
+        if not show_preview(title, description, content, tags, project):
+            print("Capture cancelled.")
+            return 0
+
+        # Parse context from args if provided (can be combined with interactive)
+        context = None
+        if args.context:
+            context = [c.strip() for c in args.context.split(",") if c.strip()]
+
+        # Capture the entry
+        knowledge_id = km.capture(
+            title=title,
+            description=description,
+            content=content,
+            tags=tags if tags else None,
+            context=context,
+            project=project if project else None,
+        )
+
+        print(f"\nKnowledge captured with ID: {knowledge_id}")
+        return 0
+
+    except KeyboardInterrupt:
+        print("\n\nCapture cancelled.")
+        return 0
+    except RuntimeError as e:
+        print(f"\nError: {e}")
+        return 1
 
 
 def cmd_retrieve(args: argparse.Namespace, km: KnowledgeManager) -> int:

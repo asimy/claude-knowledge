@@ -650,6 +650,20 @@ class KnowledgeManager:
         rows = cursor.fetchall()
         return [dict(row) for row in rows]
 
+    def get_distinct_projects(self) -> list[str]:
+        """Get list of distinct project names.
+
+        Returns:
+            List of project names, sorted alphabetically.
+        """
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT DISTINCT project FROM knowledge "
+            "WHERE project IS NOT NULL AND project != '' "
+            "ORDER BY project"
+        )
+        return [row[0] for row in cursor.fetchall()]
+
     def stats(self) -> dict[str, Any]:
         """Get statistics about the knowledge base.
 

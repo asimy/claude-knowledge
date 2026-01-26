@@ -15,8 +15,6 @@ The following features must be completed before the 1.0 release:
 
 ### CLI Improvements
 
-- **Shell Completions**: Generate bash/zsh/fish completions for commands and options
-- **Interactive Capture**: Prompt-based capture mode for easier entry creation
 - **Colored Output**: Syntax highlighting for code blocks in terminal output
 
 ### Search Enhancements
@@ -72,6 +70,11 @@ The following features must be completed before the 1.0 release:
 - **Remote Storage**: Store knowledge in external databases for team sharing
 
 ## Completed
+
+### v0.5.0
+
+- Shell completions for bash, zsh, and fish with dynamic project/entry ID suggestions
+- Interactive capture mode (`capture -i`) with editor integration and preview confirmation
 
 ### v0.4.0
 
