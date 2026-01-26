@@ -711,6 +711,149 @@ class KnowledgeManager:
             "recently_used": recently_used,
         }
 
+    def find_duplicates(
+        self,
+        threshold: float = 0.85,
+        project: str | None = None,
+    ) -> list[list[dict[str, Any]]]:
+        """Find potential duplicate entries based on semantic similarity.
+
+        Args:
+            threshold: Minimum similarity score (0.0-1.0) to consider as duplicate.
+            project: Optional project filter.
+
+        Returns:
+            List of duplicate groups, where each group is a list of similar entries
+            with their similarity scores.
+        """
+        entries = self.list_all(project=project, limit=1000)
+        if len(entries) < 2:
+            return []
+
+        # Track which entries have been grouped
+        grouped_ids: set[str] = set()
+        duplicate_groups: list[list[dict[str, Any]]] = []
+
+        for entry in entries:
+            if entry["id"] in grouped_ids:
+                continue
+
+            # Query ChromaDB for similar entries
+            entry_full = self.get(entry["id"])
+            if not entry_full:
+                continue
+
+            embedding_text = self._create_embedding_text(
+                entry_full["title"],
+                entry_full["description"],
+                entry_full["content"],
+            )
+            query_embedding = self._generate_embedding(embedding_text)
+
+            # Get more results than needed to find all duplicates
+            results = self.collection.query(
+                query_embeddings=[query_embedding],
+                n_results=min(len(entries), 20),
+                include=["distances"],
+            )
+
+            if not results["ids"] or not results["ids"][0]:
+                continue
+
+            # Find entries above threshold (excluding self)
+            group = [{"id": entry["id"], "title": entry["title"], "similarity": 1.0}]
+            ids = results["ids"][0]
+            distances = results["distances"][0] if results["distances"] else []
+
+            for i, kid in enumerate(ids):
+                if kid == entry["id"] or kid in grouped_ids:
+                    continue
+
+                similarity = 1 - distances[i] if i < len(distances) else 0
+                if similarity >= threshold:
+                    other = self.get(kid)
+                    if other:
+                        # Apply project filter if specified
+                        if project and other.get("project") != project:
+                            continue
+                        group.append(
+                            {
+                                "id": kid,
+                                "title": other["title"],
+                                "similarity": round(similarity, 3),
+                            }
+                        )
+
+            # Only include groups with actual duplicates
+            if len(group) > 1:
+                # Mark all in group as processed
+                for item in group:
+                    grouped_ids.add(item["id"])
+                duplicate_groups.append(group)
+
+        return duplicate_groups
+
+    def merge_entries(
+        self,
+        target_id: str,
+        source_id: str,
+        delete_source: bool = True,
+    ) -> bool:
+        """Merge two entries, combining their content.
+
+        The source entry's content is appended to the target entry.
+        Tags and context are merged. Usage counts are summed.
+
+        Args:
+            target_id: ID of the entry to merge into (kept).
+            source_id: ID of the entry to merge from (optionally deleted).
+            delete_source: Whether to delete the source entry after merging.
+
+        Returns:
+            True if merge succeeded, False if either entry not found.
+        """
+        target = self.get(target_id)
+        source = self.get(source_id)
+
+        if not target or not source:
+            return False
+
+        # Merge content
+        merged_content = f"{target['content']}\n\n---\n\n{source['content']}"
+
+        # Merge tags
+        target_tags = json_to_tags(target.get("tags"))
+        source_tags = json_to_tags(source.get("tags"))
+        merged_tags = list(set(target_tags + source_tags))
+
+        # Merge context
+        target_context = json_to_context(target.get("context"))
+        source_context = json_to_context(source.get("context"))
+        merged_context = list(set(target_context + source_context))
+
+        # Update target
+        self.update(
+            target_id,
+            content=merged_content,
+            tags=merged_tags,
+            context=merged_context,
+        )
+
+        # Update usage count (sum both)
+        cursor = self.conn.cursor()
+        new_usage = (target.get("usage_count") or 0) + (source.get("usage_count") or 0)
+        cursor.execute(
+            "UPDATE knowledge SET usage_count = ? WHERE id = ?",
+            (new_usage, target_id),
+        )
+        self.conn.commit()
+
+        # Delete source if requested
+        if delete_source:
+            self.delete(source_id)
+
+        return True
+
     def export_all(self, project: str | None = None) -> list[dict[str, Any]]:
         """Export all knowledge entries as a list of dictionaries.
 

@@ -492,3 +492,118 @@ class TestContextManager:
                 assert len(kid) == 12
         finally:
             shutil.rmtree(temp_dir)
+
+
+class TestDuplicateDetection:
+    """Tests for duplicate detection functionality."""
+
+    def test_find_duplicates_empty(self, temp_km):
+        """Test finding duplicates with no entries."""
+        groups = temp_km.find_duplicates()
+        assert groups == []
+
+    def test_find_duplicates_single_entry(self, temp_km):
+        """Test finding duplicates with single entry."""
+        temp_km.capture(
+            title="Test Entry",
+            description="A test description",
+            content="Test content here",
+        )
+        groups = temp_km.find_duplicates()
+        assert groups == []
+
+    def test_find_duplicates_no_matches(self, temp_km):
+        """Test finding duplicates with dissimilar entries."""
+        temp_km.capture(
+            title="OAuth Implementation",
+            description="How to implement OAuth",
+            content="Use authlib for OAuth authentication",
+        )
+        temp_km.capture(
+            title="Database Optimization",
+            description="How to optimize database queries",
+            content="Use indexes and query planning",
+        )
+        groups = temp_km.find_duplicates()
+        assert groups == []
+
+    def test_find_duplicates_similar_entries(self, temp_km):
+        """Test finding duplicates with similar entries."""
+        temp_km.capture(
+            title="OAuth Implementation",
+            description="How to implement OAuth with authlib",
+            content="Use authlib for OAuth. Configure client ID and secret.",
+        )
+        temp_km.capture(
+            title="OAuth Setup",
+            description="Setting up OAuth authentication with authlib",
+            content="Authlib OAuth setup requires client ID and secret.",
+        )
+        groups = temp_km.find_duplicates(threshold=0.7)
+        assert len(groups) >= 1
+        assert len(groups[0]) == 2
+
+    def test_find_duplicates_threshold(self, temp_km):
+        """Test that threshold affects duplicate detection."""
+        temp_km.capture(
+            title="Python Testing",
+            description="How to test Python code",
+            content="Use pytest for testing Python applications",
+        )
+        temp_km.capture(
+            title="Python Unit Tests",
+            description="Writing unit tests in Python",
+            content="Pytest is great for Python unit testing",
+        )
+
+        # High threshold should find fewer duplicates
+        groups_high = temp_km.find_duplicates(threshold=0.95)
+        groups_low = temp_km.find_duplicates(threshold=0.5)
+
+        assert len(groups_low) >= len(groups_high)
+
+    def test_merge_entries(self, temp_km):
+        """Test merging two entries."""
+        id1 = temp_km.capture(
+            title="Entry One",
+            description="First entry",
+            content="Content one",
+            tags="tag1,tag2",
+        )
+        id2 = temp_km.capture(
+            title="Entry Two",
+            description="Second entry",
+            content="Content two",
+            tags="tag2,tag3",
+        )
+
+        result = temp_km.merge_entries(id1, id2)
+        assert result is True
+
+        # Check target has merged content
+        merged = temp_km.get(id1)
+        assert "Content one" in merged["content"]
+        assert "Content two" in merged["content"]
+
+        # Check tags are merged
+        tags = json_to_tags(merged["tags"])
+        assert "tag1" in tags
+        assert "tag2" in tags
+        assert "tag3" in tags
+
+        # Check source is deleted
+        assert temp_km.get(id2) is None
+
+    def test_merge_entries_not_found(self, temp_km):
+        """Test merging with nonexistent entry."""
+        id1 = temp_km.capture(
+            title="Entry One",
+            description="First entry",
+            content="Content one",
+        )
+
+        result = temp_km.merge_entries(id1, "nonexistent")
+        assert result is False
+
+        result = temp_km.merge_entries("nonexistent", id1)
+        assert result is False

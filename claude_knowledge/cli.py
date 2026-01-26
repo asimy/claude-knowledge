@@ -288,6 +288,28 @@ def create_parser() -> argparse.ArgumentParser:
         help="Only sync entries for this project",
     )
 
+    # duplicates command
+    duplicates_parser = subparsers.add_parser(
+        "duplicates",
+        help="Find potential duplicate entries",
+    )
+    duplicates_parser.add_argument(
+        "--threshold",
+        type=float,
+        default=0.85,
+        help="Similarity threshold 0.0-1.0 (default: 0.85)",
+    )
+    duplicates_parser.add_argument(
+        "--project",
+        help="Only check entries for this project",
+    )
+    duplicates_parser.add_argument(
+        "--merge",
+        nargs=2,
+        metavar=("TARGET_ID", "SOURCE_ID"),
+        help="Merge SOURCE_ID into TARGET_ID",
+    )
+
     return parser
 
 
@@ -689,6 +711,40 @@ def cmd_sync(args: argparse.Namespace, km: KnowledgeManager) -> int:
     return 0
 
 
+def cmd_duplicates(args: argparse.Namespace, km: KnowledgeManager) -> int:
+    """Handle the duplicates command."""
+    # Handle merge operation
+    if args.merge:
+        target_id, source_id = args.merge
+        if km.merge_entries(target_id, source_id):
+            print(f"Merged {source_id} into {target_id}")
+            return 0
+        else:
+            print("Error: One or both entries not found")
+            return 1
+
+    # Find duplicates
+    groups = km.find_duplicates(threshold=args.threshold, project=args.project)
+
+    if not groups:
+        print("No potential duplicates found.")
+        return 0
+
+    print(f"Found {len(groups)} potential duplicate group(s):\n")
+
+    for i, group in enumerate(groups, 1):
+        print(f"Group {i}:")
+        for entry in group:
+            sim_str = f" ({entry['similarity']:.0%})" if entry["similarity"] < 1.0 else ""
+            print(f"  {entry['id']}: {entry['title']}{sim_str}")
+        print()
+
+    print("To merge duplicates, use:")
+    print("  claude-kb duplicates --merge <target_id> <source_id>")
+
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """Main entry point for the CLI."""
     parser = create_parser()
@@ -729,6 +785,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_purge(args, km)
         elif args.command == "sync":
             return cmd_sync(args, km)
+        elif args.command == "duplicates":
+            return cmd_duplicates(args, km)
         else:
             parser.print_help()
             return 0
