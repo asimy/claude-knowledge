@@ -291,6 +291,7 @@ version = "0.4.0"
 source = { editable = "." }
 dependencies = [
     { name = "chromadb" },
+    { name = "rich" },
     { name = "sentence-transformers" },
 ]
 
@@ -313,6 +314,7 @@ requires-dist = [
     { name = "chromadb", specifier = ">=0.4.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0.0" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=4.0.0" },
+    { name = "rich", specifier = ">=13.0.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8.0" },
     { name = "sentence-transformers", specifier = ">=2.2.0" },
     { name = "ty", marker = "extra == 'dev'", specifier = ">=0.0.1a7" },
