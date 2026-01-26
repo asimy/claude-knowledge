@@ -115,6 +115,35 @@ class KnowledgeManager:
                 entries_created INTEGER DEFAULT 0
             )
         """)
+        # Table for tracking processed git commits
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS processed_commits (
+                commit_sha TEXT NOT NULL,
+                repo_path TEXT NOT NULL,
+                processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                entries_created INTEGER DEFAULT 0,
+                PRIMARY KEY (commit_sha, repo_path)
+            )
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_processed_commits_repo
+            ON processed_commits(repo_path)
+        """)
+        # Table for tracking processed files (for code analysis)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS processed_files (
+                file_path TEXT NOT NULL,
+                content_hash TEXT NOT NULL,
+                repo_path TEXT NOT NULL,
+                processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                entries_created INTEGER DEFAULT 0,
+                PRIMARY KEY (file_path, repo_path)
+            )
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_processed_files_repo
+            ON processed_files(repo_path)
+        """)
         self.conn.commit()
         self._migrate_schema()
 
@@ -1864,6 +1893,176 @@ class KnowledgeManager:
                 """
                 SELECT session_id, project_path, processed_at, entries_created
                 FROM processed_sessions
+                ORDER BY processed_at DESC
+                """
+            )
+        return [dict(row) for row in cursor.fetchall()]
+
+    # Git commit processing methods
+
+    def is_commit_processed(self, commit_sha: str, repo_path: str) -> bool:
+        """Check if a commit has been processed.
+
+        Args:
+            commit_sha: Git commit SHA.
+            repo_path: Path to the repository.
+
+        Returns:
+            True if the commit has been processed.
+        """
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT 1 FROM processed_commits WHERE commit_sha = ? AND repo_path = ?",
+            (commit_sha, repo_path),
+        )
+        return cursor.fetchone() is not None
+
+    def mark_commit_processed(
+        self,
+        commit_sha: str,
+        repo_path: str,
+        entries_created: int = 0,
+    ) -> None:
+        """Mark a commit as processed.
+
+        Args:
+            commit_sha: Git commit SHA.
+            repo_path: Path to the repository.
+            entries_created: Number of knowledge entries created from this commit.
+        """
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """
+            INSERT OR REPLACE INTO processed_commits
+            (commit_sha, repo_path, processed_at, entries_created)
+            VALUES (?, ?, CURRENT_TIMESTAMP, ?)
+            """,
+            (commit_sha, repo_path, entries_created),
+        )
+        self.conn.commit()
+
+    def get_processed_commits(
+        self,
+        repo_path: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Get list of processed commits.
+
+        Args:
+            repo_path: Optional filter by repository path.
+
+        Returns:
+            List of processed commit records.
+        """
+        cursor = self.conn.cursor()
+        if repo_path:
+            cursor.execute(
+                """
+                SELECT commit_sha, repo_path, processed_at, entries_created
+                FROM processed_commits
+                WHERE repo_path = ?
+                ORDER BY processed_at DESC
+                """,
+                (repo_path,),
+            )
+        else:
+            cursor.execute(
+                """
+                SELECT commit_sha, repo_path, processed_at, entries_created
+                FROM processed_commits
+                ORDER BY processed_at DESC
+                """
+            )
+        return [dict(row) for row in cursor.fetchall()]
+
+    # File processing methods (for code analysis)
+
+    def is_file_processed(
+        self,
+        file_path: str,
+        repo_path: str,
+        content_hash: str | None = None,
+    ) -> bool:
+        """Check if a file has been processed.
+
+        Args:
+            file_path: Path to the file.
+            repo_path: Path to the repository.
+            content_hash: Optional content hash. If provided, also checks
+                         if the hash matches (file hasn't changed).
+
+        Returns:
+            True if the file has been processed (and hasn't changed if hash provided).
+        """
+        cursor = self.conn.cursor()
+        if content_hash:
+            cursor.execute(
+                """
+                SELECT 1 FROM processed_files
+                WHERE file_path = ? AND repo_path = ? AND content_hash = ?
+                """,
+                (file_path, repo_path, content_hash),
+            )
+        else:
+            cursor.execute(
+                "SELECT 1 FROM processed_files WHERE file_path = ? AND repo_path = ?",
+                (file_path, repo_path),
+            )
+        return cursor.fetchone() is not None
+
+    def mark_file_processed(
+        self,
+        file_path: str,
+        content_hash: str,
+        repo_path: str,
+        entries_created: int = 0,
+    ) -> None:
+        """Mark a file as processed.
+
+        Args:
+            file_path: Path to the file.
+            content_hash: Content hash of the file.
+            repo_path: Path to the repository.
+            entries_created: Number of knowledge entries created from this file.
+        """
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """
+            INSERT OR REPLACE INTO processed_files
+            (file_path, content_hash, repo_path, processed_at, entries_created)
+            VALUES (?, ?, ?, CURRENT_TIMESTAMP, ?)
+            """,
+            (file_path, content_hash, repo_path, entries_created),
+        )
+        self.conn.commit()
+
+    def get_processed_files(
+        self,
+        repo_path: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Get list of processed files.
+
+        Args:
+            repo_path: Optional filter by repository path.
+
+        Returns:
+            List of processed file records.
+        """
+        cursor = self.conn.cursor()
+        if repo_path:
+            cursor.execute(
+                """
+                SELECT file_path, content_hash, repo_path, processed_at, entries_created
+                FROM processed_files
+                WHERE repo_path = ?
+                ORDER BY processed_at DESC
+                """,
+                (repo_path,),
+            )
+        else:
+            cursor.execute(
+                """
+                SELECT file_path, content_hash, repo_path, processed_at, entries_created
+                FROM processed_files
                 ORDER BY processed_at DESC
                 """
             )

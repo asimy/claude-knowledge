@@ -499,6 +499,66 @@ def create_parser() -> argparse.ArgumentParser:
         help="Maximum sessions to list (default: 20)",
     )
 
+    # analyze command
+    analyze_parser = subparsers.add_parser(
+        "analyze",
+        help="Extract knowledge from git commits and code patterns",
+    )
+    analyze_parser.add_argument(
+        "--commits",
+        action="store_true",
+        help="Analyze git commit history",
+    )
+    analyze_parser.add_argument(
+        "--patterns",
+        action="store_true",
+        help="Analyze code patterns and architecture",
+    )
+    analyze_parser.add_argument(
+        "--since",
+        help="Analyze commits from the last N days (e.g., '30d')",
+    )
+    analyze_parser.add_argument(
+        "--limit",
+        type=int,
+        default=50,
+        help="Maximum commits to analyze (default: 50)",
+    )
+    analyze_parser.add_argument(
+        "--preview",
+        action="store_true",
+        help="Preview extraction without capturing",
+    )
+    analyze_parser.add_argument(
+        "--auto",
+        action="store_true",
+        help="Auto-capture entries meeting confidence threshold",
+    )
+    analyze_parser.add_argument(
+        "--min-confidence",
+        type=float,
+        default=0.5,
+        help="Minimum confidence for auto-capture (default: 0.5)",
+    )
+    analyze_parser.add_argument(
+        "--include",
+        action="append",
+        default=[],
+        help="Include file patterns (e.g., '*.py'). Can be specified multiple times.",
+    )
+    analyze_parser.add_argument(
+        "--exclude",
+        action="append",
+        default=[],
+        help="Exclude file patterns (e.g., 'test_*'). Can be specified multiple times.",
+    )
+    analyze_project = analyze_parser.add_argument(
+        "--project",
+        help="Project path to analyze (default: current directory)",
+    )
+    if sync_path_completer:
+        analyze_project.completer = sync_path_completer
+
     return parser
 
 
@@ -1389,6 +1449,241 @@ def cmd_summarize(args: argparse.Namespace, km: KnowledgeManager) -> int:
     return 0
 
 
+def cmd_analyze(args: argparse.Namespace, km: KnowledgeManager) -> int:
+    """Handle the analyze command."""
+    from datetime import datetime, timedelta
+    from pathlib import Path
+
+    from claude_knowledge.code_extractor import CodeExtractor
+    from claude_knowledge.code_parser import CodeParser
+    from claude_knowledge.git_extractor import GitExtractor
+    from claude_knowledge.git_parser import GitParser
+
+    # Determine project path
+    project_path = Path(args.project).resolve() if args.project else Path.cwd()
+    project_name = project_path.name
+
+    if not args.commits and not args.patterns:
+        # Default: show help
+        console.print("Usage: claude-kb analyze [--commits] [--patterns] [options]")
+        console.print()
+        console.print("Modes:")
+        console.print("  --commits           Analyze git commit history")
+        console.print("  --patterns          Analyze code patterns and architecture")
+        console.print()
+        console.print("Options:")
+        console.print("  --since Nd          Analyze commits from last N days (e.g., '30d')")
+        console.print("  --limit N           Maximum commits to analyze (default: 50)")
+        console.print("  --preview           Preview without capturing")
+        console.print("  --auto              Auto-capture entries meeting threshold")
+        console.print("  --min-confidence N  Minimum confidence (default: 0.5)")
+        console.print("  --include PATTERN   Include file patterns (can repeat)")
+        console.print("  --exclude PATTERN   Exclude file patterns (can repeat)")
+        console.print("  --project PATH      Project path (default: current directory)")
+        return 0
+
+    total_extracted = 0
+    total_captured = 0
+
+    # Handle --commits
+    if args.commits:
+        console.print(f"[bold]Analyzing git commits in:[/bold] {project_path}")
+
+        git_parser = GitParser(project_path)
+
+        if not git_parser.is_git_repo():
+            print_error(f"Not a git repository: {project_path}")
+            return 1
+
+        # Parse --since argument
+        since = None
+        if args.since:
+            since_str = args.since.lower()
+            if since_str.endswith("d"):
+                days = int(since_str[:-1])
+                since = datetime.now() - timedelta(days=days)
+            elif since_str.endswith("h"):
+                hours = int(since_str[:-1])
+                since = datetime.now() - timedelta(hours=hours)
+            else:
+                print_error(f"Invalid --since format: {args.since}. Use '30d' or '24h'.")
+                return 1
+
+        # Get commits
+        commits = git_parser.get_commits_with_diffs(
+            since=since,
+            limit=args.limit,
+        )
+
+        if not commits:
+            console.print("No commits found to analyze.")
+        else:
+            console.print(f"Found [cyan]{len(commits)}[/cyan] commits to analyze.\n")
+
+            # Filter out already processed commits
+            unprocessed = []
+            for commit in commits:
+                if not km.is_commit_processed(commit.sha, str(project_path)):
+                    unprocessed.append(commit)
+
+            if not unprocessed:
+                console.print("All commits have already been processed.")
+            else:
+                console.print(
+                    f"[cyan]{len(unprocessed)}[/cyan] unprocessed commits "
+                    f"(skipping {len(commits) - len(unprocessed)} already processed).\n"
+                )
+
+                git_extractor = GitExtractor()
+                extractions = git_extractor.extract_from_commits(
+                    unprocessed,
+                    min_confidence=args.min_confidence,
+                )
+
+                for ext in extractions:
+                    total_extracted += 1
+                    confidence_text = format_score(ext.confidence)
+
+                    console.print(f"[bold]{ext.title}[/bold]")
+                    console.print("  Confidence: ", end="")
+                    console.print(confidence_text)
+                    console.print(f"  Type: [cyan]{ext.extraction_type}[/cyan]")
+                    if ext.tags:
+                        console.print(f"  Tags: [cyan]{', '.join(ext.tags)}[/cyan]")
+                    console.print(f"  SHA: [dim]{ext.source_sha[:8]}[/dim]")
+
+                    if args.preview:
+                        # Show content preview
+                        preview = ext.content[:200] if len(ext.content) > 200 else ext.content
+                        console.print(f"  Preview: {preview}...")
+                        console.print()
+                        continue
+
+                    if args.auto and ext.confidence >= args.min_confidence:
+                        knowledge_id = km.capture(
+                            title=ext.title,
+                            description=ext.description,
+                            content=ext.content,
+                            tags=",".join(ext.tags),
+                            project=project_name,
+                            source="git",
+                            confidence=ext.confidence,
+                        )
+                        total_captured += 1
+                        console.print(f"  [green]Captured: {knowledge_id}[/green]")
+
+                        # Mark commit as processed
+                        km.mark_commit_processed(ext.source_sha, str(project_path), 1)
+
+                    console.print()
+
+                # Mark remaining commits as processed (even if no extraction)
+                if args.auto and not args.preview:
+                    processed_shas = {ext.source_sha for ext in extractions}
+                    for commit in unprocessed:
+                        if commit.sha not in processed_shas:
+                            km.mark_commit_processed(commit.sha, str(project_path), 0)
+
+    # Handle --patterns
+    if args.patterns:
+        console.print(f"\n[bold]Analyzing code patterns in:[/bold] {project_path}")
+
+        default_includes = ["*.py", "*.js", "*.ts", "*.go", "*.rb"]
+        include_patterns = args.include if args.include else default_includes
+        exclude_patterns = args.exclude if args.exclude else None
+
+        code_parser = CodeParser(
+            base_path=project_path,
+            include_patterns=include_patterns,
+            exclude_patterns=exclude_patterns,
+        )
+
+        files = code_parser.scan_files()
+        if not files:
+            console.print("No source files found to analyze.")
+        else:
+            console.print(f"Found [cyan]{len(files)}[/cyan] source files.\n")
+
+            # Filter out already processed files
+            unprocessed_files = []
+            for file_path in files:
+                content_hash = code_parser.get_file_hash(file_path)
+                if content_hash and not km.is_file_processed(
+                    str(file_path), str(project_path), content_hash
+                ):
+                    unprocessed_files.append(file_path)
+
+            if not unprocessed_files:
+                console.print("All files have already been processed.")
+            else:
+                console.print(
+                    f"[cyan]{len(unprocessed_files)}[/cyan] files to process "
+                    f"(skipping {len(files) - len(unprocessed_files)} unchanged).\n"
+                )
+
+                parsed_files = code_parser.parse_files(unprocessed_files)
+                code_extractor = CodeExtractor(code_parser)
+                extractions = code_extractor.extract(parsed_files, project_name)
+
+                for ext in extractions:
+                    if ext.confidence < args.min_confidence:
+                        continue
+
+                    total_extracted += 1
+                    confidence_text = format_score(ext.confidence)
+
+                    console.print(f"[bold]{ext.title}[/bold]")
+                    console.print("  Confidence: ", end="")
+                    console.print(confidence_text)
+                    console.print(f"  Type: [cyan]{ext.extraction_type}[/cyan]")
+                    if ext.tags:
+                        console.print(f"  Tags: [cyan]{', '.join(ext.tags)}[/cyan]")
+                    if ext.source_files:
+                        files_preview = ", ".join(Path(f).name for f in ext.source_files[:3])
+                        if len(ext.source_files) > 3:
+                            files_preview += f", +{len(ext.source_files) - 3} more"
+                        console.print(f"  Files: [dim]{files_preview}[/dim]")
+
+                    if args.preview:
+                        # Show description
+                        console.print(f"  Description: {ext.description[:100]}...")
+                        console.print()
+                        continue
+
+                    if args.auto and ext.confidence >= args.min_confidence:
+                        knowledge_id = km.capture(
+                            title=ext.title,
+                            description=ext.description,
+                            content=ext.content,
+                            tags=",".join(ext.tags),
+                            project=project_name,
+                            source="code",
+                            confidence=ext.confidence,
+                        )
+                        total_captured += 1
+                        console.print(f"  [green]Captured: {knowledge_id}[/green]")
+
+                    console.print()
+
+                # Mark files as processed
+                if args.auto and not args.preview:
+                    for parsed_file in parsed_files:
+                        km.mark_file_processed(
+                            parsed_file.path,
+                            parsed_file.content_hash,
+                            str(project_path),
+                            0,  # We don't track per-file entry counts
+                        )
+
+    # Summary
+    console.print()
+    console.print(f"Total extractions found: [cyan]{total_extracted}[/cyan]")
+    if args.auto:
+        console.print(f"Total entries captured: [green]{total_captured}[/green]")
+
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """Main entry point for the CLI."""
     parser = create_parser()
@@ -1450,6 +1745,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_quality(args, km)
         elif args.command == "summarize":
             return cmd_summarize(args, km)
+        elif args.command == "analyze":
+            return cmd_analyze(args, km)
         else:
             parser.print_help()
             return 0

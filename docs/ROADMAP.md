@@ -9,7 +9,7 @@ The following features must be completed before the 1.0 release:
 - [ ] **All Near-term items** (Knowledge Quality, CLI Improvements, Search Enhancements)
 - [ ] **Knowledge Relationships** (Linking, Collections, Dependency Tracking)
 - [ ] **Versioning** (Entry History, Rollback, Diff View)
-- [ ] **Automatic Knowledge Extraction** (Code Analysis, Session Summarization, Documentation Mining)
+- [x] **Automatic Knowledge Extraction** (Code Analysis, Session Summarization, Documentation Mining)
 
 ## Near-term
 
@@ -43,13 +43,6 @@ The following features must be completed before the 1.0 release:
 
 - **MCP Server**: Expose knowledge base via Model Context Protocol for direct Claude integration
 - **Webhook Support**: Trigger notifications on capture/update/delete events
-- **Git Integration**: Automatically capture knowledge from commit messages or PR descriptions
-
-### Automatic Knowledge Extraction
-
-- **Code Analysis**: Extract patterns and solutions from code changes
-- **Session Summarization**: Automatically summarize coding sessions into knowledge entries
-- **Documentation Mining**: Extract knowledge from project documentation
 
 ## Long-term
 
@@ -67,7 +60,17 @@ The following features must be completed before the 1.0 release:
 
 ## Completed
 
-### v0.7.0 (planned)
+### v0.8.0
+
+- Code analysis feature for automatic knowledge extraction
+- Git commit parser and extractor with commit type classification
+- Code pattern detection (repository, service, factory, etc.)
+- Docstring extraction as knowledge entries
+- Confidence scoring for git commits and code patterns
+- Incremental processing with commit/file tracking in database
+- CLI `analyze` command with `--commits` and `--patterns` modes
+
+### v0.7.0
 
 - Session summarization to extract knowledge from Claude Code transcripts
 - Problem-solution detection with confidence scoring
