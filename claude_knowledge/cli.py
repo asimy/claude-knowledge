@@ -3,7 +3,6 @@
 import argparse
 import json
 import sys
-from typing import NoReturn
 
 from claude_knowledge.knowledge_manager import KnowledgeManager
 from claude_knowledge.utils import json_to_tags
@@ -81,6 +80,12 @@ def create_parser() -> argparse.ArgumentParser:
         choices=["text", "json", "markdown"],
         default="markdown",
         help="Output format (default: markdown)",
+    )
+    retrieve_parser.add_argument(
+        "--min-score",
+        type=float,
+        default=0.3,
+        help="Minimum relevance score 0.0-1.0 (default: 0.3)",
     )
 
     # list command
@@ -193,6 +198,50 @@ def create_parser() -> argparse.ArgumentParser:
         help="New project",
     )
 
+    # export command
+    export_parser = subparsers.add_parser(
+        "export",
+        help="Export knowledge to JSON file",
+    )
+    export_parser.add_argument(
+        "file",
+        help="Output file path (use - for stdout)",
+    )
+    export_parser.add_argument(
+        "--project",
+        help="Only export entries for this project",
+    )
+
+    # import command
+    import_parser = subparsers.add_parser(
+        "import",
+        help="Import knowledge from JSON file",
+    )
+    import_parser.add_argument(
+        "file",
+        help="Input file path (use - for stdin)",
+    )
+    import_parser.add_argument(
+        "--no-skip-duplicates",
+        action="store_true",
+        help="Raise error on duplicate IDs instead of skipping",
+    )
+
+    # purge command
+    purge_parser = subparsers.add_parser(
+        "purge",
+        help="Delete all knowledge entries",
+    )
+    purge_parser.add_argument(
+        "--project",
+        help="Only purge entries for this project",
+    )
+    purge_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Skip confirmation prompt",
+    )
+
     return parser
 
 
@@ -222,6 +271,7 @@ def cmd_retrieve(args: argparse.Namespace, km: KnowledgeManager) -> int:
         n_results=args.limit,
         token_budget=args.budget,
         project=args.project,
+        min_score=args.min_score,
     )
 
     if not items:
@@ -434,7 +484,74 @@ def cmd_update(args: argparse.Namespace, km: KnowledgeManager) -> int:
         return 1
 
 
-def main(argv: list[str] | None = None) -> int | NoReturn:
+def cmd_export(args: argparse.Namespace, km: KnowledgeManager) -> int:
+    """Handle the export command."""
+    entries = km.export_all(project=args.project)
+
+    if not entries:
+        print("No entries to export.")
+        return 0
+
+    output = json.dumps(entries, indent=2, default=str)
+
+    if args.file == "-":
+        print(output)
+    else:
+        with open(args.file, "w") as f:
+            f.write(output)
+        print(f"Exported {len(entries)} entries to {args.file}")
+
+    return 0
+
+
+def cmd_import(args: argparse.Namespace, km: KnowledgeManager) -> int:
+    """Handle the import command."""
+    if args.file == "-":
+        data = sys.stdin.read()
+    else:
+        with open(args.file) as f:
+            data = f.read()
+
+    try:
+        entries = json.loads(data)
+    except json.JSONDecodeError as e:
+        print(f"Error: Invalid JSON: {e}")
+        return 1
+
+    if not isinstance(entries, list):
+        print("Error: JSON must be a list of entries")
+        return 1
+
+    result = km.import_data(entries, skip_duplicates=not args.no_skip_duplicates)
+
+    print(f"Imported: {result['imported']}")
+    if result["skipped"]:
+        print(f"Skipped (duplicates): {result['skipped']}")
+    if result["errors"]:
+        print(f"Errors: {result['errors']}")
+
+    return 0 if result["errors"] == 0 else 1
+
+
+def cmd_purge(args: argparse.Namespace, km: KnowledgeManager) -> int:
+    """Handle the purge command."""
+    if not args.force:
+        if args.project:
+            prompt = f"Delete all entries for project '{args.project}'? [y/N] "
+        else:
+            prompt = "Delete ALL knowledge entries? [y/N] "
+
+        response = input(prompt).strip().lower()
+        if response != "y":
+            print("Aborted.")
+            return 0
+
+    count = km.purge(project=args.project)
+    print(f"Deleted {count} entries.")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
     """Main entry point for the CLI."""
     parser = create_parser()
     args = parser.parse_args(argv)
@@ -466,6 +583,12 @@ def main(argv: list[str] | None = None) -> int | NoReturn:
             return cmd_get(args, km)
         elif args.command == "update":
             return cmd_update(args, km)
+        elif args.command == "export":
+            return cmd_export(args, km)
+        elif args.command == "import":
+            return cmd_import(args, km)
+        elif args.command == "purge":
+            return cmd_purge(args, km)
         else:
             parser.print_help()
             return 0

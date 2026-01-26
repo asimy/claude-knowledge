@@ -38,7 +38,6 @@ class KnowledgeManager:
 
         self.chroma_path = self.base_path / "chroma_db"
         self.sqlite_path = self.base_path / "knowledge.db"
-        self.config_path = self.base_path / "config.json"
 
         # Initialize components
         self._init_chroma()
@@ -152,7 +151,20 @@ class KnowledgeManager:
 
         Returns:
             The generated knowledge ID.
+
+        Raises:
+            ValueError: If title, description, or content is empty, or confidence is out of range.
         """
+        # Validate required fields
+        if not title or not title.strip():
+            raise ValueError("title cannot be empty")
+        if not description or not description.strip():
+            raise ValueError("description cannot be empty")
+        if not content or not content.strip():
+            raise ValueError("content cannot be empty")
+        if not 0.0 <= confidence <= 1.0:
+            raise ValueError("confidence must be between 0.0 and 1.0")
+
         timestamp = datetime.now()
         knowledge_id = generate_id(title, timestamp)
         brief = create_brief(content)
@@ -594,6 +606,115 @@ class KnowledgeManager:
             "recently_added": recent,
             "recently_used": recently_used,
         }
+
+    def export_all(self, project: str | None = None) -> list[dict[str, Any]]:
+        """Export all knowledge entries as a list of dictionaries.
+
+        Args:
+            project: Optional project filter.
+
+        Returns:
+            List of knowledge entries with all fields.
+        """
+        cursor = self.conn.cursor()
+
+        if project:
+            cursor.execute("SELECT * FROM knowledge WHERE project = ?", (project,))
+        else:
+            cursor.execute("SELECT * FROM knowledge")
+
+        rows = cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    def import_data(
+        self,
+        entries: list[dict[str, Any]],
+        skip_duplicates: bool = True,
+    ) -> dict[str, int]:
+        """Import knowledge entries from a list of dictionaries.
+
+        Args:
+            entries: List of knowledge entry dictionaries.
+            skip_duplicates: If True, skip entries with existing IDs. If False, raise error.
+
+        Returns:
+            Dictionary with counts: {"imported": n, "skipped": n, "errors": n}
+        """
+        imported = 0
+        skipped = 0
+        errors = 0
+
+        for entry in entries:
+            try:
+                # Check for required fields
+                required = ["title", "description", "content"]
+                if not all(entry.get(f) for f in required):
+                    errors += 1
+                    continue
+
+                # Check if ID already exists
+                existing_id = entry.get("id")
+                if existing_id:
+                    existing = self.get(existing_id)
+                    if existing:
+                        if skip_duplicates:
+                            skipped += 1
+                            continue
+                        else:
+                            raise ValueError(f"Entry with ID {existing_id} already exists")
+
+                # Capture the entry (generates new ID if not provided or if provided ID exists)
+                self.capture(
+                    title=entry["title"],
+                    description=entry["description"],
+                    content=entry["content"],
+                    tags=entry.get("tags"),
+                    context=entry.get("context"),
+                    project=entry.get("project"),
+                    source=entry.get("source", "import"),
+                    confidence=entry.get("confidence", 1.0),
+                )
+                imported += 1
+
+            except Exception:
+                errors += 1
+
+        return {"imported": imported, "skipped": skipped, "errors": errors}
+
+    def purge(self, project: str | None = None) -> int:
+        """Delete all knowledge entries, optionally filtered by project.
+
+        Args:
+            project: If specified, only delete entries for this project.
+                    If None, delete ALL entries.
+
+        Returns:
+            Number of entries deleted.
+        """
+        cursor = self.conn.cursor()
+
+        # Get IDs to delete
+        if project:
+            cursor.execute("SELECT id FROM knowledge WHERE project = ?", (project,))
+        else:
+            cursor.execute("SELECT id FROM knowledge")
+
+        ids = [row[0] for row in cursor.fetchall()]
+
+        if not ids:
+            return 0
+
+        # Delete from ChromaDB
+        self.collection.delete(ids=ids)
+
+        # Delete from SQLite
+        if project:
+            cursor.execute("DELETE FROM knowledge WHERE project = ?", (project,))
+        else:
+            cursor.execute("DELETE FROM knowledge")
+
+        self.conn.commit()
+        return len(ids)
 
     def close(self) -> None:
         """Close database connections."""
