@@ -13,12 +13,6 @@ The following features must be completed before the 1.0 release:
 
 ## Near-term
 
-### Knowledge Quality
-
-- **Duplicate Detection**: Identify and merge similar entries to reduce redundancy
-- **Staleness Tracking**: Flag entries that haven't been used or updated in a configurable period
-- **Quality Scoring**: Assign quality scores based on completeness (tags, description length, usage frequency)
-
 ### CLI Improvements
 
 - **Shell Completions**: Generate bash/zsh/fish completions for commands and options
@@ -78,6 +72,13 @@ The following features must be completed before the 1.0 release:
 - **Remote Storage**: Store knowledge in external databases for team sharing
 
 ## Completed
+
+### v0.4.0
+
+- Duplicate detection with semantic similarity matching
+- Entry merging to consolidate duplicates
+- Staleness tracking with configurable inactivity threshold
+- Quality scoring based on completeness (tags, description, content, usage)
 
 ### v0.3.0
 
