@@ -2,6 +2,15 @@
 
 This document outlines potential future directions for the Claude Knowledge Management System.
 
+## v1.0 Release Criteria
+
+The following features must be completed before the 1.0 release:
+
+- [ ] **All Near-term items** (Knowledge Quality, CLI Improvements, Search Enhancements)
+- [ ] **Knowledge Relationships** (Linking, Collections, Dependency Tracking)
+- [ ] **Versioning** (Entry History, Rollback, Diff View)
+- [ ] **Automatic Knowledge Extraction** (Code Analysis, Session Summarization, Documentation Mining)
+
 ## Near-term
 
 ### Knowledge Quality
@@ -48,13 +57,13 @@ This document outlines potential future directions for the Claude Knowledge Mana
 - **Webhook Support**: Trigger notifications on capture/update/delete events
 - **Git Integration**: Automatically capture knowledge from commit messages or PR descriptions
 
-## Long-term
-
 ### Automatic Knowledge Extraction
 
 - **Code Analysis**: Extract patterns and solutions from code changes
 - **Session Summarization**: Automatically summarize coding sessions into knowledge entries
 - **Documentation Mining**: Extract knowledge from project documentation
+
+## Long-term
 
 ### Advanced Search
 
