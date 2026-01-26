@@ -3,6 +3,7 @@
 import hashlib
 import json
 import re
+import socket
 from datetime import datetime
 from typing import Any
 
@@ -206,3 +207,29 @@ def escape_like_pattern(text: str) -> str:
     text = text.replace("%", "\\%")
     text = text.replace("_", "\\_")
     return text
+
+
+def compute_content_hash(entry: dict[str, Any]) -> str:
+    """Compute SHA-256 hash of entry content fields for sync change detection.
+
+    Args:
+        entry: Knowledge entry dictionary.
+
+    Returns:
+        SHA-256 hash as hex string.
+    """
+    # Hash the fields that represent the entry's content
+    title = entry.get("title", "")
+    description = entry.get("description", "")
+    body = entry.get("content", "")
+    content = f"{title}\n{description}\n{body}"
+    return hashlib.sha256(content.encode()).hexdigest()
+
+
+def get_machine_id() -> str:
+    """Get a machine identifier for sync tracking.
+
+    Returns:
+        Hostname of the current machine.
+    """
+    return socket.gethostname()

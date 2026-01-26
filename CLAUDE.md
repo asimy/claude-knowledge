@@ -25,6 +25,7 @@ uv run ruff format claude_knowledge/ tests/
 uv run claude-kb --help
 uv run claude-kb stats
 uv run claude-kb list
+uv run claude-kb sync /path/to/sync/dir  # sync across devices
 ```
 
 ## Architecture
@@ -39,6 +40,8 @@ uv run claude-kb list
 - `KnowledgeManager` (`knowledge_manager.py`): Core logic, manages both databases, lazy-loads embedding model
 - `cli.py`: Argparse-based CLI with subcommands, delegates to KnowledgeManager
 
-**Storage location**: `~/.claude_knowledge/` (chroma_db/, knowledge.db)
+**Storage location**: `~/.claude_knowledge/` (chroma_db/, knowledge.db, config.json)
+
+**Sync**: Bidirectional sync to shared directory (git, Dropbox, iCloud). One JSON file per entry with tombstone-based deletion tracking.
 
 **Embedding model**: `all-MiniLM-L6-v2` (~80MB, downloaded on first use)

@@ -242,6 +242,52 @@ def create_parser() -> argparse.ArgumentParser:
         help="Skip confirmation prompt",
     )
 
+    # sync command
+    sync_parser = subparsers.add_parser(
+        "sync",
+        help="Sync knowledge with a directory",
+    )
+    sync_parser.add_argument(
+        "path",
+        nargs="?",
+        help="Path to sync directory (uses saved path if omitted)",
+    )
+    sync_parser.add_argument(
+        "--push-only",
+        action="store_true",
+        help="Only push local changes to sync directory",
+    )
+    sync_parser.add_argument(
+        "--pull-only",
+        action="store_true",
+        help="Only pull remote changes from sync directory",
+    )
+    sync_parser.add_argument(
+        "--strategy",
+        choices=["last-write-wins", "local-wins", "remote-wins", "manual"],
+        default="last-write-wins",
+        help="Conflict resolution strategy (default: last-write-wins)",
+    )
+    sync_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would be synced without making changes",
+    )
+    sync_parser.add_argument(
+        "--init",
+        action="store_true",
+        help="Initialize sync directory structure",
+    )
+    sync_parser.add_argument(
+        "--status",
+        action="store_true",
+        help="Show sync status without syncing",
+    )
+    sync_parser.add_argument(
+        "--project",
+        help="Only sync entries for this project",
+    )
+
     return parser
 
 
@@ -551,6 +597,98 @@ def cmd_purge(args: argparse.Namespace, km: KnowledgeManager) -> int:
     return 0
 
 
+def cmd_sync(args: argparse.Namespace, km: KnowledgeManager) -> int:
+    """Handle the sync command."""
+    sync_path = args.path
+
+    # Handle --init flag
+    if args.init:
+        if not sync_path:
+            print("Error: Path required for --init")
+            return 1
+        km.init_sync_dir(sync_path)
+        km.set_sync_path(sync_path)
+        print(f"Initialized sync directory: {sync_path}")
+        return 0
+
+    # Handle --status flag
+    if args.status:
+        try:
+            status = km.sync_status(sync_path=sync_path, project=args.project)
+        except ValueError as e:
+            print(f"Error: {e}")
+            return 1
+
+        if "error" in status:
+            print(f"Error: {status['error']}")
+            return 1
+
+        print(f"Sync status for: {status['sync_path']}")
+        print("=" * 40)
+        print(f"To push:         {len(status['to_push'])}")
+        print(f"To pull:         {len(status['to_pull'])}")
+        print(f"Conflicts:       {len(status['conflicts'])}")
+        print(f"Delete local:    {len(status['to_delete_local'])}")
+        print(f"Delete remote:   {len(status['to_delete_remote'])}")
+
+        if status["to_push"]:
+            print("\nEntries to push:")
+            for entry_id in status["to_push"][:5]:
+                entry = km.get(entry_id)
+                if entry:
+                    print(f"  {entry_id}: {entry['title']}")
+            if len(status["to_push"]) > 5:
+                print(f"  ... and {len(status['to_push']) - 5} more")
+
+        if status["to_pull"]:
+            print("\nEntries to pull:")
+            for entry_id in status["to_pull"][:5]:
+                print(f"  {entry_id}")
+            if len(status["to_pull"]) > 5:
+                print(f"  ... and {len(status['to_pull']) - 5} more")
+
+        return 0
+
+    # Perform sync
+    try:
+        result = km.sync(
+            sync_path=sync_path,
+            strategy=args.strategy,
+            push_only=args.push_only,
+            pull_only=args.pull_only,
+            dry_run=args.dry_run,
+            project=args.project,
+        )
+    except ValueError as e:
+        print(f"Error: {e}")
+        return 1
+
+    if result.errors:
+        for error in result.errors:
+            print(f"Error: {error}")
+        return 1
+
+    prefix = "[DRY RUN] " if args.dry_run else ""
+
+    print(f"{prefix}Sync complete:")
+    print(f"  Pushed:           {result.pushed}")
+    print(f"  Pulled:           {result.pulled}")
+    print(f"  Deletions pushed: {result.deletions_pushed}")
+    print(f"  Deletions pulled: {result.deletions_pulled}")
+
+    if result.conflicts:
+        print(f"\nConflicts ({len(result.conflicts)}):")
+        for conflict in result.conflicts:
+            resolution = conflict.get("resolution", "unknown")
+            print(f"  {conflict['id']}: {conflict['title']} -> {resolution}")
+
+    saved_path = km.get_sync_path()
+    if saved_path and not args.dry_run:
+        print(f"\nSync path saved: {saved_path}")
+
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """Main entry point for the CLI."""
     parser = create_parser()
@@ -589,6 +727,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_import(args, km)
         elif args.command == "purge":
             return cmd_purge(args, km)
+        elif args.command == "sync":
+            return cmd_sync(args, km)
         else:
             parser.print_help()
             return 0

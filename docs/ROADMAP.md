@@ -50,12 +50,6 @@ This document outlines potential future directions for the Claude Knowledge Mana
 
 ## Long-term
 
-### Multi-device Sync
-
-- **Cloud Sync**: Optional sync to cloud storage (S3, GCS, or similar)
-- **Conflict Resolution**: Handle concurrent edits from multiple devices
-- **Selective Sync**: Sync specific projects or tags only
-
 ### Automatic Knowledge Extraction
 
 - **Code Analysis**: Extract patterns and solutions from code changes
@@ -75,6 +69,15 @@ This document outlines potential future directions for the Claude Knowledge Mana
 - **Remote Storage**: Store knowledge in external databases for team sharing
 
 ## Completed
+
+### v0.3.0
+
+- Multi-device sync via shared directory (git, Dropbox, iCloud)
+- Bidirectional sync with conflict detection and resolution
+- Configurable conflict strategies (last-write-wins, local-wins, remote-wins, manual)
+- Sync status and dry-run modes
+- Project-filtered sync
+- Tombstone-based deletion tracking
 
 ### v0.2.0
 

@@ -157,6 +157,50 @@ claude-kb purge --project "myapp"
 claude-kb purge --force
 ```
 
+### Sync Across Devices
+
+Sync your knowledge base between multiple computers using a shared directory (git repo, Dropbox, iCloud, etc.).
+
+```bash
+# First sync (initializes and saves path)
+claude-kb sync ~/Dropbox/claude-kb-sync
+
+# Subsequent syncs (uses saved path)
+claude-kb sync
+
+# Preview changes without syncing
+claude-kb sync --dry-run
+
+# Check sync status
+claude-kb sync --status
+
+# Push local changes only
+claude-kb sync --push-only
+
+# Pull remote changes only
+claude-kb sync --pull-only
+
+# Conflict resolution strategies
+claude-kb sync --strategy=last-write-wins  # default: newest wins
+claude-kb sync --strategy=local-wins       # keep local version
+claude-kb sync --strategy=remote-wins      # take remote version
+claude-kb sync --strategy=manual           # report conflicts only
+
+# Sync specific project
+claude-kb sync --project "myapp"
+```
+
+**Sync directory structure:**
+```
+<sync-dir>/
+├── manifest.json       # Sync metadata
+├── entries/            # One JSON file per entry
+│   ├── a1b2c3d4.json
+│   └── ...
+└── tombstones/         # Deletion tracking
+    └── deleted.json
+```
+
 ## Claude Code Integration
 
 ### Installing the Skill
