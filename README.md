@@ -70,6 +70,9 @@ claude-kb retrieve --query "authentication" --project "myapp"
 
 # With formatting
 claude-kb retrieve --query "auth setup" --format json
+
+# Filter by minimum relevance score (0.0-1.0)
+claude-kb retrieve --query "oauth" --min-score 0.5
 ```
 
 ### List Knowledge
@@ -113,6 +116,45 @@ claude-kb update <knowledge-id> --title "New Title" --tags "new,tags"
 
 ```bash
 claude-kb search "oauth" --project "myapp"
+```
+
+### Export Knowledge
+
+```bash
+# Export all knowledge to a file
+claude-kb export backup.json
+
+# Export specific project
+claude-kb export myapp-backup.json --project "myapp"
+
+# Export to stdout
+claude-kb export -
+```
+
+### Import Knowledge
+
+```bash
+# Import from file
+claude-kb import backup.json
+
+# Import from stdin
+cat backup.json | claude-kb import -
+
+# Error on duplicates instead of skipping
+claude-kb import backup.json --no-skip-duplicates
+```
+
+### Purge Knowledge
+
+```bash
+# Delete all entries (with confirmation)
+claude-kb purge
+
+# Delete entries for specific project
+claude-kb purge --project "myapp"
+
+# Skip confirmation prompt
+claude-kb purge --force
 ```
 
 ## Claude Code Integration
@@ -206,8 +248,7 @@ Use consistent, specific tags:
 ```
 ~/.claude_knowledge/
 ├── chroma_db/           # Vector embeddings
-├── knowledge.db         # SQLite metadata
-└── config.json          # Configuration
+└── knowledge.db         # SQLite metadata
 ```
 
 Components:
@@ -235,6 +276,12 @@ uv run pytest tests/
 ```bash
 uv run ruff check claude_knowledge/ tests/
 uv run ruff format claude_knowledge/ tests/
+```
+
+### Type Checking
+
+```bash
+uv run ty check claude_knowledge/
 ```
 
 ### Code Structure
