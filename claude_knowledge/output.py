@@ -266,3 +266,77 @@ def print_search_item(item: dict) -> None:
     if item.get("description"):
         console.print(f"  {item['description']}")
     console.print()
+
+
+def print_relationship(rel: dict, show_direction: bool = True) -> None:
+    """Print a formatted relationship.
+
+    Args:
+        rel: Relationship dictionary with relationship_type, related_id, related_title, direction
+        show_direction: Whether to show direction indicator
+    """
+    rel_type = rel.get("relationship_type", "related")
+    related_id = rel.get("related_id", "")
+    related_title = rel.get("related_title", "(unknown)")
+    direction = rel.get("direction", "")
+
+    # Format relationship type with color
+    if rel_type == "depends-on":
+        type_str = "[yellow]depends-on[/yellow]"
+        if direction == "outgoing":
+            arrow = "->"
+        else:
+            arrow = "<-"
+    elif rel_type == "supersedes":
+        type_str = "[red]supersedes[/red]"
+        if direction == "outgoing":
+            arrow = "->"
+        else:
+            arrow = "<-"
+    else:  # related
+        type_str = "[cyan]related[/cyan]"
+        arrow = "<->"
+
+    if show_direction and direction:
+        console.print(f"  {arrow} {type_str} [dim]{related_id[:8]}[/dim] {related_title}")
+    else:
+        console.print(f"  {type_str} [dim]{related_id[:8]}[/dim] {related_title}")
+
+
+def print_collection(collection: dict, show_description: bool = True) -> None:
+    """Print a formatted collection.
+
+    Args:
+        collection: Collection dictionary with name, id, description, member_count
+        show_description: Whether to show description
+    """
+    name = collection.get("name", "")
+    coll_id = collection.get("id", "")
+    description = collection.get("description", "")
+    member_count = collection.get("member_count", 0)
+
+    console.print(
+        f"[bold]{name}[/bold] [dim]({coll_id[:8]})[/dim] [cyan]{member_count} entries[/cyan]"
+    )
+    if show_description and description:
+        console.print(f"  {description}")
+
+
+def print_collection_member(member: dict) -> None:
+    """Print a formatted collection member.
+
+    Args:
+        member: Member dictionary with id, title, project, added_at
+    """
+    from claude_knowledge.utils import json_to_tags
+
+    tags = json_to_tags(member.get("tags"))
+    tag_str = f" [cyan]\\[{', '.join(tags)}][/cyan]" if tags else ""
+    project_str = f" [magenta]({member['project']})[/magenta]" if member.get("project") else ""
+    added = member.get("added_at", "")[:10] if member.get("added_at") else ""
+    added_str = f" [dim](added {added})[/dim]" if added else ""
+
+    console.print(
+        f"  [dim]{member['id']}[/dim]: [bold]{member['title']}[/bold]"
+        f"{tag_str}{project_str}{added_str}"
+    )

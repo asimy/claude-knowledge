@@ -99,13 +99,9 @@ class GitExtractor:
         """Initialize the git extractor."""
         self._type_patterns: dict[str, list[re.Pattern[str]]] = {}
         for commit_type, patterns in self.TYPE_PATTERNS.items():
-            self._type_patterns[commit_type] = [
-                re.compile(p, re.IGNORECASE) for p in patterns
-            ]
+            self._type_patterns[commit_type] = [re.compile(p, re.IGNORECASE) for p in patterns]
 
-        self._generic_patterns = [
-            re.compile(p, re.IGNORECASE) for p in self.GENERIC_PATTERNS
-        ]
+        self._generic_patterns = [re.compile(p, re.IGNORECASE) for p in self.GENERIC_PATTERNS]
 
     def extract(self, commit: GitCommit) -> ExtractedKnowledge | None:
         """Extract knowledge from a single commit.
@@ -426,8 +422,7 @@ class GitExtractor:
                     "renamed": "R",
                 }.get(diff.change_type, "?")
                 content_parts.append(
-                    f"- [{change_symbol}] {diff.file_path} "
-                    f"(+{diff.additions}/-{diff.deletions})"
+                    f"- [{change_symbol}] {diff.file_path} (+{diff.additions}/-{diff.deletions})"
                 )
 
         # Include significant diffs

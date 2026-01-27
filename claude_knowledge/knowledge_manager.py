@@ -14,6 +14,7 @@ from sentence_transformers import SentenceTransformer
 from claude_knowledge._config import ConfigManager
 from claude_knowledge._embedding import EmbeddingError, EmbeddingService
 from claude_knowledge._maintenance import MaintenanceService
+from claude_knowledge._relationships import RelationshipsService
 from claude_knowledge._sync import SyncManager, SyncResult
 from claude_knowledge._tracking import ProcessingTracker
 from claude_knowledge.utils import (
@@ -70,17 +71,27 @@ class KnowledgeManager:
     # File locking
     DEFAULT_FILE_LOCK_TIMEOUT = 30.0
 
-    def __init__(self, base_path: str = "~/.claude_knowledge"):
+    def __init__(
+        self,
+        base_path: str = "~/.claude_knowledge",
+        embedding_service: "EmbeddingService | None" = None,
+    ):
         """Initialize the knowledge manager.
 
         Args:
             base_path: Base directory for all data storage.
+            embedding_service: Optional pre-configured EmbeddingService instance.
+                              If None, a new service will be created.
+                              Useful for sharing a model across multiple instances in tests.
         """
         self.base_path = Path(base_path).expanduser()
         self.base_path.mkdir(parents=True, exist_ok=True)
 
         self.chroma_path = self.base_path / "chroma_db"
         self.sqlite_path = self.base_path / "knowledge.db"
+
+        # Store provided embedding service for later initialization
+        self._provided_embedding_service = embedding_service
 
         # Initialize components
         self._init_chroma()
@@ -89,6 +100,7 @@ class KnowledgeManager:
         self._init_embedding_model()
         self._init_tracker()
         self._init_maintenance()
+        self._init_relationships()
         self._init_sync()
 
     def _init_chroma(self) -> None:
@@ -106,6 +118,8 @@ class KnowledgeManager:
         """Initialize SQLite database and create tables if needed."""
         self.conn = sqlite3.connect(str(self.sqlite_path))
         self.conn.row_factory = sqlite3.Row
+        # Enable foreign key support for cascade deletes
+        self.conn.execute("PRAGMA foreign_keys = ON")
         self._create_tables()
 
     def _create_tables(self) -> None:
@@ -172,6 +186,53 @@ class KnowledgeManager:
         cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_processed_files_repo
             ON processed_files(repo_path)
+        """)
+        # Table for entry-to-entry relationships
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS knowledge_relationships (
+                id TEXT PRIMARY KEY,
+                source_id TEXT NOT NULL,
+                target_id TEXT NOT NULL,
+                relationship_type TEXT NOT NULL,
+                created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                metadata TEXT,
+                FOREIGN KEY (source_id) REFERENCES knowledge(id) ON DELETE CASCADE,
+                FOREIGN KEY (target_id) REFERENCES knowledge(id) ON DELETE CASCADE,
+                UNIQUE(source_id, target_id, relationship_type)
+            )
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_relationships_source
+            ON knowledge_relationships(source_id)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_relationships_target
+            ON knowledge_relationships(target_id)
+        """)
+        # Table for named collections
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS knowledge_collections (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL UNIQUE,
+                description TEXT,
+                created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP
+            )
+        """)
+        # Table for collection membership
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS collection_members (
+                collection_id TEXT NOT NULL,
+                entry_id TEXT NOT NULL,
+                added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (collection_id) REFERENCES knowledge_collections(id) ON DELETE CASCADE,
+                FOREIGN KEY (entry_id) REFERENCES knowledge(id) ON DELETE CASCADE,
+                PRIMARY KEY (collection_id, entry_id)
+            )
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_collection_members_entry
+            ON collection_members(entry_id)
         """)
         self.conn.commit()
         self._migrate_schema()
@@ -244,7 +305,10 @@ class KnowledgeManager:
 
     def _init_embedding_model(self) -> None:
         """Initialize the embedding service."""
-        self._embedding = EmbeddingService()
+        if self._provided_embedding_service is not None:
+            self._embedding = self._provided_embedding_service
+        else:
+            self._embedding = EmbeddingService()
 
     def _init_tracker(self) -> None:
         """Initialize the processing tracker."""
@@ -252,15 +316,17 @@ class KnowledgeManager:
 
     def _init_maintenance(self) -> None:
         """Initialize the maintenance service."""
-        self._maintenance = MaintenanceService(
+        self._maintenance = MaintenanceService(self.conn, self.collection, self._embedding, self)
+
+    def _init_relationships(self) -> None:
+        """Initialize the relationships service."""
+        self._relationships = RelationshipsService(
             self.conn, self.collection, self._embedding, self
         )
 
     def _init_sync(self) -> None:
         """Initialize the sync manager."""
-        self._sync = SyncManager(
-            self.conn, self.collection, self._embedding, self._config, self
-        )
+        self._sync = SyncManager(self.conn, self.collection, self._embedding, self._config, self)
 
     @property
     def model(self) -> SentenceTransformer:
@@ -289,14 +355,10 @@ class KnowledgeManager:
         """
         if date_field not in self.ALLOWED_DATE_FIELDS:
             allowed = ", ".join(sorted(self.ALLOWED_DATE_FIELDS))
-            raise ValueError(
-                f"Invalid date_field '{date_field}'. Must be one of: {allowed}"
-            )
+            raise ValueError(f"Invalid date_field '{date_field}'. Must be one of: {allowed}")
 
     @contextmanager
-    def _file_lock(
-        self, lock_path: Path, timeout: float | None = None
-    ) -> Iterator[None]:
+    def _file_lock(self, lock_path: Path, timeout: float | None = None) -> Iterator[None]:
         """Acquire an exclusive file lock for sync operations.
 
         Uses fcntl on Unix systems for proper file locking.
@@ -384,9 +446,7 @@ class KnowledgeManager:
 
         # Validate input size limits
         if len(title) > self.MAX_TITLE_LENGTH:
-            raise ValueError(
-                f"title exceeds maximum length of {self.MAX_TITLE_LENGTH} characters"
-            )
+            raise ValueError(f"title exceeds maximum length of {self.MAX_TITLE_LENGTH} characters")
         if len(description) > self.MAX_DESCRIPTION_LENGTH:
             raise ValueError(
                 f"description exceeds maximum length of {self.MAX_DESCRIPTION_LENGTH} characters"
@@ -1004,6 +1064,234 @@ class KnowledgeManager:
             List of entries with quality_score field, sorted by score ascending.
         """
         return self._maintenance.score_quality(project, min_score, max_score)
+
+    # Relationship methods (delegated to RelationshipsService)
+
+    def link(
+        self,
+        source_id: str,
+        target_id: str,
+        relationship_type: str = "related",
+        metadata: dict[str, Any] | None = None,
+    ) -> str:
+        """Create a relationship between two entries.
+
+        For 'related' type (bidirectional), the relationship is stored with
+        the lexicographically smaller ID as source to ensure uniqueness.
+
+        Args:
+            source_id: ID of the source entry.
+            target_id: ID of the target entry.
+            relationship_type: Type of relationship ('related', 'depends-on', 'supersedes').
+            metadata: Optional metadata for the relationship.
+
+        Returns:
+            The relationship ID.
+
+        Raises:
+            ValueError: If relationship type is invalid, IDs are the same,
+                       or either entry doesn't exist.
+        """
+        return self._relationships.link(source_id, target_id, relationship_type, metadata)
+
+    def unlink(
+        self,
+        source_id: str,
+        target_id: str,
+        relationship_type: str | None = None,
+    ) -> bool:
+        """Remove a relationship between two entries.
+
+        For 'related' type, checks both orderings since it's bidirectional.
+
+        Args:
+            source_id: ID of the source entry.
+            target_id: ID of the target entry.
+            relationship_type: Optional type filter. If None, removes all relationships
+                              between the two entries.
+
+        Returns:
+            True if any relationship was removed, False if none found.
+        """
+        return self._relationships.unlink(source_id, target_id, relationship_type)
+
+    def get_related(
+        self,
+        entry_id: str,
+        relationship_type: str | None = None,
+        direction: str = "both",
+    ) -> list[dict[str, Any]]:
+        """Get entries related to the given entry.
+
+        Args:
+            entry_id: ID of the entry to find relationships for.
+            relationship_type: Optional filter by relationship type.
+            direction: Direction filter ('outgoing', 'incoming', 'both').
+
+        Returns:
+            List of related entries with relationship info.
+        """
+        return self._relationships.get_related(entry_id, relationship_type, direction)
+
+    def get_dependency_tree(
+        self,
+        entry_id: str,
+        depth: int = 3,
+    ) -> dict[str, Any]:
+        """Get the dependency tree for an entry.
+
+        Traverses 'depends-on' relationships to build a tree of dependencies.
+
+        Args:
+            entry_id: ID of the entry to get dependencies for.
+            depth: Maximum depth to traverse (default 3, max 10).
+
+        Returns:
+            Dictionary with entry info and nested dependencies.
+        """
+        return self._relationships.get_dependency_tree(entry_id, depth)
+
+    def get_entry_relationships(self, entry_id: str) -> list[dict[str, Any]]:
+        """Get all relationships for an entry (both directions).
+
+        Args:
+            entry_id: ID of the entry.
+
+        Returns:
+            List of all relationships involving this entry.
+        """
+        return self._relationships.get_entry_relationships(entry_id)
+
+    def has_relationships_or_collections(self, entry_id: str) -> dict[str, int]:
+        """Check if an entry has any relationships or collection memberships.
+
+        Args:
+            entry_id: ID of the entry.
+
+        Returns:
+            Dictionary with counts: {'relationships': N, 'collections': N}
+        """
+        return self._relationships.has_relationships_or_collections(entry_id)
+
+    # Collection methods (delegated to RelationshipsService)
+
+    def create_collection(
+        self,
+        name: str,
+        description: str = "",
+    ) -> str:
+        """Create a new collection.
+
+        Args:
+            name: Unique name for the collection.
+            description: Optional description.
+
+        Returns:
+            The collection ID.
+
+        Raises:
+            ValueError: If name is empty, too long, or already exists.
+        """
+        return self._relationships.create_collection(name, description)
+
+    def delete_collection(self, collection_id_or_name: str) -> bool:
+        """Delete a collection.
+
+        Args:
+            collection_id_or_name: Collection ID or name.
+
+        Returns:
+            True if deleted, False if not found.
+        """
+        return self._relationships.delete_collection(collection_id_or_name)
+
+    def get_collection(self, collection_id_or_name: str) -> dict[str, Any] | None:
+        """Get a collection by ID or name.
+
+        Args:
+            collection_id_or_name: Collection ID or name.
+
+        Returns:
+            Collection dictionary or None if not found.
+        """
+        return self._relationships.get_collection(collection_id_or_name)
+
+    def list_collections(self, limit: int | None = None) -> list[dict[str, Any]]:
+        """List all collections.
+
+        Args:
+            limit: Maximum number of collections to return.
+
+        Returns:
+            List of collections with member counts.
+        """
+        return self._relationships.list_collections(limit)
+
+    def add_to_collection(
+        self,
+        collection_id_or_name: str,
+        entry_id: str,
+    ) -> bool:
+        """Add an entry to a collection.
+
+        Args:
+            collection_id_or_name: Collection ID or name.
+            entry_id: ID of the entry to add.
+
+        Returns:
+            True if added, False if already a member.
+
+        Raises:
+            ValueError: If collection or entry doesn't exist.
+        """
+        return self._relationships.add_to_collection(collection_id_or_name, entry_id)
+
+    def remove_from_collection(
+        self,
+        collection_id_or_name: str,
+        entry_id: str,
+    ) -> bool:
+        """Remove an entry from a collection.
+
+        Args:
+            collection_id_or_name: Collection ID or name.
+            entry_id: ID of the entry to remove.
+
+        Returns:
+            True if removed, False if not a member.
+
+        Raises:
+            ValueError: If collection doesn't exist.
+        """
+        return self._relationships.remove_from_collection(collection_id_or_name, entry_id)
+
+    def get_collection_members(
+        self,
+        collection_id_or_name: str,
+    ) -> list[dict[str, Any]]:
+        """Get all entries in a collection.
+
+        Args:
+            collection_id_or_name: Collection ID or name.
+
+        Returns:
+            List of entries in the collection.
+
+        Raises:
+            ValueError: If collection doesn't exist.
+        """
+        return self._relationships.get_collection_members(collection_id_or_name)
+
+    def get_entry_collections(self, entry_id: str) -> list[dict[str, Any]]:
+        """Get all collections that contain an entry.
+
+        Args:
+            entry_id: ID of the entry.
+
+        Returns:
+            List of collections containing the entry.
+        """
+        return self._relationships.get_entry_collections(entry_id)
 
     def export_all(self, project: str | None = None) -> list[dict[str, Any]]:
         """Export all knowledge entries as a list of dictionaries.

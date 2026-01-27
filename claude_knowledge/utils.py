@@ -61,9 +61,7 @@ def fuzzy_match_tag(query_tag: str, item_tags: list[str], max_distance: int = 2)
     return False
 
 
-def fuzzy_match_tags(
-    query_tags: list[str], item_tags: list[str], max_distance: int = 2
-) -> bool:
+def fuzzy_match_tags(query_tags: list[str], item_tags: list[str], max_distance: int = 2) -> bool:
     """Check if all query tags fuzzy-match item tags (AND logic).
 
     Args:

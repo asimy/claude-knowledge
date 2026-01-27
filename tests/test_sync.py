@@ -10,15 +10,8 @@ import pytest
 from claude_knowledge.knowledge_manager import KnowledgeManager
 from claude_knowledge.utils import compute_content_hash, get_machine_id
 
-
-@pytest.fixture
-def temp_km():
-    """Create a temporary knowledge manager for testing."""
-    temp_dir = tempfile.mkdtemp()
-    km = KnowledgeManager(base_path=temp_dir)
-    yield km
-    km.close()
-    shutil.rmtree(temp_dir)
+# temp_km and populated_km fixtures are provided by conftest.py
+# shared_embedding_service fixture is also provided by conftest.py for manual KM creation
 
 
 @pytest.fixture
@@ -27,26 +20,6 @@ def sync_dir():
     temp_dir = tempfile.mkdtemp()
     yield Path(temp_dir)
     shutil.rmtree(temp_dir)
-
-
-@pytest.fixture
-def populated_km(temp_km):
-    """Create a knowledge manager with sample data."""
-    temp_km.capture(
-        title="OAuth Implementation",
-        description="How to implement OAuth with authlib",
-        content="Use authlib for OAuth. Configure with OAUTH_CLIENT_ID.",
-        tags="auth,oauth,python",
-        project="myapp",
-    )
-    temp_km.capture(
-        title="Database Connection Pooling",
-        description="Setting up connection pooling with SQLAlchemy",
-        content="Use create_engine with pool_size=5, max_overflow=10.",
-        tags="database,sqlalchemy,python",
-        project="myapp",
-    )
-    return temp_km
 
 
 class TestSyncUtils:
@@ -89,6 +62,8 @@ class TestInitSyncDir:
         assert (sync_dir / "entries").is_dir()
         assert (sync_dir / "tombstones").is_dir()
         assert (sync_dir / "tombstones" / "deleted.json").exists()
+        assert (sync_dir / "relationships").is_dir()
+        assert (sync_dir / "collections").is_dir()
 
     def test_init_creates_valid_manifest(self, temp_km, sync_dir):
         """Test that manifest is valid JSON with correct structure."""
@@ -98,9 +73,11 @@ class TestInitSyncDir:
             manifest = json.load(f)
 
         assert "version" in manifest
-        assert manifest["version"] == 1
+        assert manifest["version"] == 2  # Updated for relationships/collections support
         assert "last_sync" in manifest
         assert "entries" in manifest
+        assert "relationships" in manifest
+        assert "collections" in manifest
 
     def test_init_saves_sync_path(self, temp_km, sync_dir):
         """Test that init saves the sync path to config."""
@@ -118,12 +95,12 @@ class TestSyncPush:
         """Test that sync push creates entry files."""
         result = populated_km.sync(sync_path=sync_dir)
 
-        assert result.pushed == 2
+        assert result.pushed == 3
         assert result.pulled == 0
 
         entries_dir = sync_dir / "entries"
         entry_files = list(entries_dir.glob("*.json"))
-        assert len(entry_files) == 2
+        assert len(entry_files) == 3
 
     def test_push_entry_format(self, populated_km, sync_dir):
         """Test that pushed entries have correct format."""
@@ -144,14 +121,14 @@ class TestSyncPush:
         """Test push-only mode."""
         result = populated_km.sync(sync_path=sync_dir, push_only=True)
 
-        assert result.pushed == 2
+        assert result.pushed == 3
         assert result.pulled == 0
 
 
 class TestSyncPull:
     """Tests for pulling remote entries to local database."""
 
-    def test_pull_imports_entries(self, populated_km, sync_dir):
+    def test_pull_imports_entries(self, populated_km, sync_dir, shared_embedding_service):
         """Test that sync pull imports remote entries."""
         # Push from populated_km
         populated_km.sync(sync_path=sync_dir)
@@ -159,26 +136,26 @@ class TestSyncPull:
         # Create a fresh empty km for pulling
         temp_dir2 = tempfile.mkdtemp()
         try:
-            km2 = KnowledgeManager(base_path=temp_dir2)
+            km2 = KnowledgeManager(base_path=temp_dir2, embedding_service=shared_embedding_service)
             result = km2.sync(sync_path=sync_dir)
 
-            assert result.pulled == 2
-            assert len(km2.list_all()) == 2
+            assert result.pulled == 3
+            assert len(km2.list_all()) == 3
             km2.close()
         finally:
             shutil.rmtree(temp_dir2)
 
-    def test_pull_only_mode(self, populated_km, sync_dir):
+    def test_pull_only_mode(self, populated_km, sync_dir, shared_embedding_service):
         """Test pull-only mode."""
         populated_km.sync(sync_path=sync_dir)
 
         # Create a fresh empty km for pulling
         temp_dir2 = tempfile.mkdtemp()
         try:
-            km2 = KnowledgeManager(base_path=temp_dir2)
+            km2 = KnowledgeManager(base_path=temp_dir2, embedding_service=shared_embedding_service)
             result = km2.sync(sync_path=sync_dir, pull_only=True)
 
-            assert result.pulled == 2
+            assert result.pulled == 3
             assert result.pushed == 0
             km2.close()
         finally:
@@ -188,15 +165,15 @@ class TestSyncPull:
 class TestSyncBidirectional:
     """Tests for bidirectional sync."""
 
-    def test_bidirectional_no_conflict(self):
+    def test_bidirectional_no_conflict(self, shared_embedding_service):
         """Test bidirectional sync with no conflicts."""
         temp_dir1 = tempfile.mkdtemp()
         temp_dir2 = tempfile.mkdtemp()
         sync_dir = tempfile.mkdtemp()
 
         try:
-            km1 = KnowledgeManager(base_path=temp_dir1)
-            km2 = KnowledgeManager(base_path=temp_dir2)
+            km1 = KnowledgeManager(base_path=temp_dir1, embedding_service=shared_embedding_service)
+            km2 = KnowledgeManager(base_path=temp_dir2, embedding_service=shared_embedding_service)
 
             # Create different entries on each
             km1.capture(
@@ -237,7 +214,7 @@ class TestSyncBidirectional:
 class TestSyncConflicts:
     """Tests for conflict detection and resolution."""
 
-    def test_conflict_detection(self):
+    def test_conflict_detection(self, shared_embedding_service):
         """Test that conflicts are detected when both sides change.
 
         A conflict occurs when both local and remote have changed since the last sync.
@@ -248,8 +225,8 @@ class TestSyncConflicts:
         sync_dir = tempfile.mkdtemp()
 
         try:
-            km1 = KnowledgeManager(base_path=temp_dir1)
-            km2 = KnowledgeManager(base_path=temp_dir2)
+            km1 = KnowledgeManager(base_path=temp_dir1, embedding_service=shared_embedding_service)
+            km2 = KnowledgeManager(base_path=temp_dir2, embedding_service=shared_embedding_service)
 
             # Create entry on km1 and sync
             kid = km1.capture(
@@ -285,15 +262,15 @@ class TestSyncConflicts:
             shutil.rmtree(temp_dir2)
             shutil.rmtree(sync_dir)
 
-    def test_conflict_local_wins(self):
+    def test_conflict_local_wins(self, shared_embedding_service):
         """Test local-wins conflict resolution."""
         temp_dir1 = tempfile.mkdtemp()
         temp_dir2 = tempfile.mkdtemp()
         sync_dir = tempfile.mkdtemp()
 
         try:
-            km1 = KnowledgeManager(base_path=temp_dir1)
-            km2 = KnowledgeManager(base_path=temp_dir2)
+            km1 = KnowledgeManager(base_path=temp_dir1, embedding_service=shared_embedding_service)
+            km2 = KnowledgeManager(base_path=temp_dir2, embedding_service=shared_embedding_service)
 
             kid = km1.capture(
                 title="Shared Entry",
@@ -326,15 +303,15 @@ class TestSyncConflicts:
             shutil.rmtree(temp_dir2)
             shutil.rmtree(sync_dir)
 
-    def test_conflict_remote_wins(self):
+    def test_conflict_remote_wins(self, shared_embedding_service):
         """Test remote-wins conflict resolution."""
         temp_dir1 = tempfile.mkdtemp()
         temp_dir2 = tempfile.mkdtemp()
         sync_dir = tempfile.mkdtemp()
 
         try:
-            km1 = KnowledgeManager(base_path=temp_dir1)
-            km2 = KnowledgeManager(base_path=temp_dir2)
+            km1 = KnowledgeManager(base_path=temp_dir1, embedding_service=shared_embedding_service)
+            km2 = KnowledgeManager(base_path=temp_dir2, embedding_service=shared_embedding_service)
 
             kid = km1.capture(
                 title="Shared Entry",
@@ -378,22 +355,22 @@ class TestSyncDryRun:
 
         result = populated_km.sync(sync_path=sync_dir, dry_run=True)
 
-        assert result.pushed == 2
+        assert result.pushed == 3
         # Files should not exist (dry run)
         entry_files = list((sync_dir / "entries").glob("*.json"))
         assert len(entry_files) == 0
 
-    def test_dry_run_reports_changes(self, populated_km, sync_dir):
+    def test_dry_run_reports_changes(self, populated_km, sync_dir, shared_embedding_service):
         """Test that dry run correctly reports what would happen."""
         populated_km.sync(sync_path=sync_dir)
 
         # Create a fresh empty km for dry run pull
         temp_dir2 = tempfile.mkdtemp()
         try:
-            km2 = KnowledgeManager(base_path=temp_dir2)
+            km2 = KnowledgeManager(base_path=temp_dir2, embedding_service=shared_embedding_service)
             result = km2.sync(sync_path=sync_dir, dry_run=True)
 
-            assert result.pulled == 2
+            assert result.pulled == 3
             # But no entries should actually be imported
             assert len(km2.list_all()) == 0
             km2.close()
@@ -411,7 +388,7 @@ class TestSyncStatus:
 
         status = populated_km.sync_status()
 
-        assert len(status["to_push"]) == 2
+        assert len(status["to_push"]) == 3
         assert len(status["to_pull"]) == 0
 
     def test_status_after_sync(self, populated_km, sync_dir):
@@ -455,13 +432,13 @@ class TestSyncConfig:
 class TestSyncProjectFilter:
     """Tests for project-filtered sync."""
 
-    def test_sync_single_project(self):
+    def test_sync_single_project(self, shared_embedding_service):
         """Test syncing only a specific project."""
         temp_dir = tempfile.mkdtemp()
         sync_dir = tempfile.mkdtemp()
 
         try:
-            km = KnowledgeManager(base_path=temp_dir)
+            km = KnowledgeManager(base_path=temp_dir, embedding_service=shared_embedding_service)
 
             km.capture(
                 title="Project A Entry",

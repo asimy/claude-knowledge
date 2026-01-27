@@ -12,9 +12,12 @@ from claude_knowledge.output import (
     format_quality_score,
     format_score,
     print_code_block,
+    print_collection,
+    print_collection_member,
     print_error,
     print_knowledge_item,
     print_list_item,
+    print_relationship,
     print_search_item,
     print_success,
     print_warning,
@@ -211,6 +214,10 @@ def create_parser() -> argparse.ArgumentParser:
         "--fuzzy",
         action="store_true",
         help="Enable fuzzy tag matching (matches with minor typos)",
+    )
+    list_parser.add_argument(
+        "--collection",
+        help="Filter by collection (ID or name)",
     )
 
     # delete command
@@ -637,6 +644,157 @@ def create_parser() -> argparse.ArgumentParser:
     if sync_path_completer:
         analyze_project.completer = sync_path_completer
 
+    # link command
+    link_parser = subparsers.add_parser(
+        "link",
+        help="Create a relationship between two entries",
+    )
+    link_source = link_parser.add_argument(
+        "source_id",
+        help="ID of the source entry",
+    )
+    if entry_id_completer:
+        link_source.completer = entry_id_completer
+    link_target = link_parser.add_argument(
+        "target_id",
+        help="ID of the target entry",
+    )
+    if entry_id_completer:
+        link_target.completer = entry_id_completer
+    link_parser.add_argument(
+        "--type",
+        choices=["related", "depends-on", "supersedes"],
+        default="related",
+        dest="relationship_type",
+        help="Type of relationship (default: related)",
+    )
+
+    # unlink command
+    unlink_parser = subparsers.add_parser(
+        "unlink",
+        help="Remove a relationship between two entries",
+    )
+    unlink_source = unlink_parser.add_argument(
+        "source_id",
+        help="ID of the source entry",
+    )
+    if entry_id_completer:
+        unlink_source.completer = entry_id_completer
+    unlink_target = unlink_parser.add_argument(
+        "target_id",
+        help="ID of the target entry",
+    )
+    if entry_id_completer:
+        unlink_target.completer = entry_id_completer
+    unlink_parser.add_argument(
+        "--type",
+        choices=["related", "depends-on", "supersedes"],
+        dest="relationship_type",
+        help="Only remove relationships of this type",
+    )
+
+    # collection command
+    collection_parser = subparsers.add_parser(
+        "collection",
+        help="Manage knowledge collections",
+    )
+    collection_subparsers = collection_parser.add_subparsers(
+        dest="collection_command",
+        help="Collection commands",
+    )
+
+    # collection create
+    coll_create_parser = collection_subparsers.add_parser(
+        "create",
+        help="Create a new collection",
+    )
+    coll_create_parser.add_argument(
+        "name",
+        help="Name for the collection",
+    )
+    coll_create_parser.add_argument(
+        "--description",
+        default="",
+        help="Description for the collection",
+    )
+
+    # collection delete
+    coll_delete_parser = collection_subparsers.add_parser(
+        "delete",
+        help="Delete a collection",
+    )
+    coll_delete_parser.add_argument(
+        "collection",
+        help="Collection ID or name",
+    )
+    coll_delete_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Skip confirmation prompt",
+    )
+
+    # collection list
+    coll_list_parser = collection_subparsers.add_parser(
+        "list",
+        help="List all collections",
+    )
+    coll_list_parser.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+
+    # collection show
+    coll_show_parser = collection_subparsers.add_parser(
+        "show",
+        help="Show a collection and its members",
+    )
+    coll_show_parser.add_argument(
+        "collection",
+        help="Collection ID or name",
+    )
+    coll_show_parser.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+
+    # collection add
+    coll_add_parser = collection_subparsers.add_parser(
+        "add",
+        help="Add entries to a collection",
+    )
+    coll_add_parser.add_argument(
+        "collection",
+        help="Collection ID or name",
+    )
+    coll_add_entries = coll_add_parser.add_argument(
+        "entry_ids",
+        nargs="+",
+        help="Entry IDs to add",
+    )
+    if entry_id_completer:
+        coll_add_entries.completer = entry_id_completer
+
+    # collection remove
+    coll_remove_parser = collection_subparsers.add_parser(
+        "remove",
+        help="Remove entries from a collection",
+    )
+    coll_remove_parser.add_argument(
+        "collection",
+        help="Collection ID or name",
+    )
+    coll_remove_entries = coll_remove_parser.add_argument(
+        "entry_ids",
+        nargs="+",
+        help="Entry IDs to remove",
+    )
+    if entry_id_completer:
+        coll_remove_entries.completer = entry_id_completer
+
     return parser
 
 
@@ -793,22 +951,35 @@ def cmd_retrieve(args: argparse.Namespace, km: KnowledgeManager) -> int:
 
 def cmd_list(args: argparse.Namespace, km: KnowledgeManager) -> int:
     """Handle the list command."""
-    # Parse date filters
-    since = parse_relative_date(args.since) if args.since else None
-    until = parse_relative_date(args.until) if args.until else None
+    # Handle --collection filter
+    if args.collection:
+        collection = km.get_collection(args.collection)
+        if not collection:
+            print_error(f"Collection not found: {args.collection}")
+            return 1
+        items = km.get_collection_members(args.collection)
+        collection_name = collection["name"]
+    else:
+        # Parse date filters
+        since = parse_relative_date(args.since) if args.since else None
+        until = parse_relative_date(args.until) if args.until else None
 
-    items = km.list_all(
-        project=args.project,
-        limit=args.limit,
-        tags=args.tags,
-        since=since,
-        until=until,
-        date_field=args.date_field,
-        fuzzy=args.fuzzy,
-    )
+        items = km.list_all(
+            project=args.project,
+            limit=args.limit,
+            tags=args.tags,
+            since=since,
+            until=until,
+            date_field=args.date_field,
+            fuzzy=args.fuzzy,
+        )
+        collection_name = None
 
     if not items:
-        console.print("No knowledge entries found.")
+        if collection_name:
+            console.print(f"No entries in collection '{collection_name}'.")
+        else:
+            console.print("No knowledge entries found.")
         return 0
 
     if args.format == "json":
@@ -824,6 +995,8 @@ def cmd_list(args: argparse.Namespace, km: KnowledgeManager) -> int:
             output.append(clean_item)
         print(json.dumps(output, indent=2))
     else:  # text
+        if collection_name:
+            console.print(f"Entries in collection '[cyan]{collection_name}[/cyan]':\n")
         for item in items:
             print_list_item(item)
 
@@ -832,11 +1005,31 @@ def cmd_list(args: argparse.Namespace, km: KnowledgeManager) -> int:
 
 def cmd_delete(args: argparse.Namespace, km: KnowledgeManager) -> int:
     """Handle the delete command."""
+    # Check if entry exists
+    entry = km.get(args.id)
+    if not entry:
+        print_error(f"Knowledge entry not found: {args.id}")
+        return 1
+
+    # Check for relationships and collections
+    counts = km.has_relationships_or_collections(args.id)
+    if counts["relationships"] > 0 or counts["collections"] > 0:
+        print_warning(
+            f"Entry has {counts['relationships']} relationship(s) and "
+            f"is in {counts['collections']} collection(s)."
+        )
+        console.print("These will be removed when the entry is deleted.")
+        console.print("Continue? [y/N] ", end="")
+        response = input().strip().lower()
+        if response != "y":
+            print_warning("Aborted.")
+            return 0
+
     if km.delete(args.id):
         print_success(f"Deleted knowledge entry: {args.id}")
         return 0
     else:
-        print_error(f"Knowledge entry not found: {args.id}")
+        print_error(f"Failed to delete entry: {args.id}")
         return 1
 
 
@@ -922,6 +1115,10 @@ def cmd_get(args: argparse.Namespace, km: KnowledgeManager) -> int:
         print_error(f"Knowledge entry not found: {args.id}")
         return 1
 
+    # Get relationships and collections for this entry
+    relationships = km.get_entry_relationships(args.id)
+    collections = km.get_entry_collections(args.id)
+
     if args.format == "json":
         clean_item = {
             "id": item["id"],
@@ -933,6 +1130,8 @@ def cmd_get(args: argparse.Namespace, km: KnowledgeManager) -> int:
             "usage_count": item.get("usage_count", 0),
             "created": item.get("created"),
             "last_used": item.get("last_used"),
+            "relationships": relationships,
+            "collections": collections,
         }
         print(json.dumps(clean_item, indent=2))
     elif args.format == "markdown":
@@ -958,6 +1157,20 @@ def cmd_get(args: argparse.Namespace, km: KnowledgeManager) -> int:
         console.print()
         console.print("[bold]Content:[/bold]")
         print_code_block(item["content"])
+
+        # Show relationships if any
+        if relationships:
+            console.print()
+            console.print(f"[bold]Relationships ({len(relationships)}):[/bold]")
+            for rel in relationships:
+                print_relationship(rel)
+
+        # Show collections if any
+        if collections:
+            console.print()
+            console.print(f"[bold]Collections ({len(collections)}):[/bold]")
+            for coll in collections:
+                console.print(f"  [cyan]{coll['name']}[/cyan] [dim]({coll['id'][:8]})[/dim]")
 
     return 0
 
@@ -1796,6 +2009,211 @@ def cmd_analyze(args: argparse.Namespace, km: KnowledgeManager) -> int:
     return 0
 
 
+def cmd_link(args: argparse.Namespace, km: KnowledgeManager) -> int:
+    """Handle the link command."""
+    try:
+        rel_id = km.link(
+            args.source_id,
+            args.target_id,
+            args.relationship_type,
+        )
+        print_success(f"Created {args.relationship_type} relationship: {rel_id}")
+        return 0
+    except ValueError as e:
+        print_error(str(e))
+        return 1
+
+
+def cmd_unlink(args: argparse.Namespace, km: KnowledgeManager) -> int:
+    """Handle the unlink command."""
+    if km.unlink(args.source_id, args.target_id, args.relationship_type):
+        rel_type = args.relationship_type or "all"
+        print_success(f"Removed {rel_type} relationship(s)")
+        return 0
+    else:
+        print_error("No matching relationship found")
+        return 1
+
+
+def cmd_collection(args: argparse.Namespace, km: KnowledgeManager) -> int:
+    """Handle the collection command."""
+    if not args.collection_command:
+        console.print("Usage: claude-kb collection <command> [options]")
+        console.print()
+        console.print("Commands:")
+        console.print("  create    Create a new collection")
+        console.print("  delete    Delete a collection")
+        console.print("  list      List all collections")
+        console.print("  show      Show collection details and members")
+        console.print("  add       Add entries to a collection")
+        console.print("  remove    Remove entries from a collection")
+        return 0
+
+    if args.collection_command == "create":
+        return cmd_collection_create(args, km)
+    elif args.collection_command == "delete":
+        return cmd_collection_delete(args, km)
+    elif args.collection_command == "list":
+        return cmd_collection_list(args, km)
+    elif args.collection_command == "show":
+        return cmd_collection_show(args, km)
+    elif args.collection_command == "add":
+        return cmd_collection_add(args, km)
+    elif args.collection_command == "remove":
+        return cmd_collection_remove(args, km)
+    else:
+        print_error(f"Unknown collection command: {args.collection_command}")
+        return 1
+
+
+def cmd_collection_create(args: argparse.Namespace, km: KnowledgeManager) -> int:
+    """Handle the collection create command."""
+    try:
+        coll_id = km.create_collection(args.name, args.description)
+        print_success(f"Created collection: {args.name} ({coll_id})")
+        return 0
+    except ValueError as e:
+        print_error(str(e))
+        return 1
+
+
+def cmd_collection_delete(args: argparse.Namespace, km: KnowledgeManager) -> int:
+    """Handle the collection delete command."""
+    collection = km.get_collection(args.collection)
+    if not collection:
+        print_error(f"Collection not found: {args.collection}")
+        return 1
+
+    if not args.force:
+        member_count = collection.get("member_count", 0)
+        prompt = (
+            f"Delete collection '[bold]{collection['name']}[/bold]' "
+            f"with {member_count} member(s)? [y/N] "
+        )
+        console.print(prompt, end="")
+        response = input().strip().lower()
+        if response != "y":
+            print_warning("Aborted.")
+            return 0
+
+    if km.delete_collection(args.collection):
+        print_success(f"Deleted collection: {collection['name']}")
+        return 0
+    else:
+        print_error("Failed to delete collection")
+        return 1
+
+
+def cmd_collection_list(args: argparse.Namespace, km: KnowledgeManager) -> int:
+    """Handle the collection list command."""
+    collections = km.list_collections()
+
+    if not collections:
+        console.print("No collections found.")
+        return 0
+
+    if args.format == "json":
+        print(json.dumps(collections, indent=2))
+    else:
+        console.print(f"Found [cyan]{len(collections)}[/cyan] collection(s):\n")
+        for coll in collections:
+            print_collection(coll)
+            console.print()
+
+    return 0
+
+
+def cmd_collection_show(args: argparse.Namespace, km: KnowledgeManager) -> int:
+    """Handle the collection show command."""
+    collection = km.get_collection(args.collection)
+    if not collection:
+        print_error(f"Collection not found: {args.collection}")
+        return 1
+
+    members = km.get_collection_members(args.collection)
+
+    if args.format == "json":
+        output = {
+            "collection": collection,
+            "members": members,
+        }
+        print(json.dumps(output, indent=2))
+    else:
+        console.print(f"[bold]{collection['name']}[/bold]")
+        console.print(f"ID: [dim]{collection['id']}[/dim]")
+        if collection.get("description"):
+            console.print(f"Description: {collection['description']}")
+        console.print(f"Created: [dim]{collection.get('created', '')[:10]}[/dim]")
+        console.print(f"\n[cyan]{len(members)}[/cyan] member(s):\n")
+
+        if members:
+            for member in members:
+                print_collection_member(member)
+        else:
+            console.print("  (no members)")
+
+    return 0
+
+
+def cmd_collection_add(args: argparse.Namespace, km: KnowledgeManager) -> int:
+    """Handle the collection add command."""
+    collection = km.get_collection(args.collection)
+    if not collection:
+        print_error(f"Collection not found: {args.collection}")
+        return 1
+
+    added = 0
+    skipped = 0
+    errors = 0
+
+    for entry_id in args.entry_ids:
+        try:
+            if km.add_to_collection(args.collection, entry_id):
+                added += 1
+            else:
+                skipped += 1
+        except ValueError as e:
+            print_error(str(e))
+            errors += 1
+
+    if added > 0:
+        print_success(f"Added {added} entry/entries to {collection['name']}")
+    if skipped > 0:
+        print_warning(f"Skipped {skipped} (already members)")
+    if errors > 0:
+        print_error(f"Errors: {errors}")
+
+    return 0 if errors == 0 else 1
+
+
+def cmd_collection_remove(args: argparse.Namespace, km: KnowledgeManager) -> int:
+    """Handle the collection remove command."""
+    collection = km.get_collection(args.collection)
+    if not collection:
+        print_error(f"Collection not found: {args.collection}")
+        return 1
+
+    removed = 0
+    not_found = 0
+
+    for entry_id in args.entry_ids:
+        try:
+            if km.remove_from_collection(args.collection, entry_id):
+                removed += 1
+            else:
+                not_found += 1
+        except ValueError as e:
+            print_error(str(e))
+            return 1
+
+    if removed > 0:
+        print_success(f"Removed {removed} entry/entries from {collection['name']}")
+    if not_found > 0:
+        print_warning(f"Skipped {not_found} (not members)")
+
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """Main entry point for the CLI."""
     parser = create_parser()
@@ -1859,6 +2277,12 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_summarize(args, km)
         elif args.command == "analyze":
             return cmd_analyze(args, km)
+        elif args.command == "link":
+            return cmd_link(args, km)
+        elif args.command == "unlink":
+            return cmd_unlink(args, km)
+        elif args.command == "collection":
+            return cmd_collection(args, km)
         else:
             parser.print_help()
             return 0

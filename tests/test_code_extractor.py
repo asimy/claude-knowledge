@@ -535,8 +535,7 @@ class TestCodeExtractorTags:
                     element_type="class",
                     name="TestClass",
                     docstring=(
-                        "A test class with enough documentation to be "
-                        "extracted successfully."
+                        "A test class with enough documentation to be extracted successfully."
                     ),
                     signature="class TestClass:",
                     start_line=1,

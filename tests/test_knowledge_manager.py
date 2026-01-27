@@ -16,42 +16,7 @@ from claude_knowledge.utils import (
     tags_to_json,
 )
 
-
-@pytest.fixture
-def temp_km():
-    """Create a temporary knowledge manager for testing."""
-    temp_dir = tempfile.mkdtemp()
-    km = KnowledgeManager(base_path=temp_dir)
-    yield km
-    km.close()
-    shutil.rmtree(temp_dir)
-
-
-@pytest.fixture
-def populated_km(temp_km):
-    """Create a knowledge manager with sample data."""
-    temp_km.capture(
-        title="OAuth Implementation",
-        description="How to implement OAuth with authlib",
-        content="Use authlib for OAuth. Configure with OAUTH_CLIENT_ID and OAUTH_SECRET.",
-        tags="auth,oauth,python",
-        project="myapp",
-    )
-    temp_km.capture(
-        title="Database Connection Pooling",
-        description="Setting up connection pooling with SQLAlchemy",
-        content="Use create_engine with pool_size=5, max_overflow=10 for production.",
-        tags="database,sqlalchemy,python",
-        project="myapp",
-    )
-    temp_km.capture(
-        title="React Component Testing",
-        description="Testing React components with Jest",
-        content="Use @testing-library/react for component tests. Mock API calls.",
-        tags="react,testing,javascript",
-        project="frontend",
-    )
-    return temp_km
+# temp_km and populated_km fixtures are provided by conftest.py
 
 
 class TestUtils:
@@ -514,12 +479,12 @@ class TestFormatForContext:
 class TestPersistence:
     """Tests for data persistence."""
 
-    def test_data_survives_restart(self):
+    def test_data_survives_restart(self, shared_embedding_service):
         """Test that data persists after manager restart."""
         temp_dir = tempfile.mkdtemp()
         try:
             # Create and populate
-            km1 = KnowledgeManager(base_path=temp_dir)
+            km1 = KnowledgeManager(base_path=temp_dir, embedding_service=shared_embedding_service)
             kid = km1.capture(
                 title="Persistent Data",
                 description="Should survive restart",
@@ -528,7 +493,7 @@ class TestPersistence:
             km1.close()
 
             # Reopen and verify
-            km2 = KnowledgeManager(base_path=temp_dir)
+            km2 = KnowledgeManager(base_path=temp_dir, embedding_service=shared_embedding_service)
             item = km2.get(kid)
             assert item is not None
             assert item["title"] == "Persistent Data"
@@ -540,11 +505,13 @@ class TestPersistence:
 class TestContextManager:
     """Tests for context manager support."""
 
-    def test_context_manager(self):
+    def test_context_manager(self, shared_embedding_service):
         """Test using KnowledgeManager as context manager."""
         temp_dir = tempfile.mkdtemp()
         try:
-            with KnowledgeManager(base_path=temp_dir) as km:
+            with KnowledgeManager(
+                base_path=temp_dir, embedding_service=shared_embedding_service
+            ) as km:
                 kid = km.capture(
                     title="Test",
                     description="Test",

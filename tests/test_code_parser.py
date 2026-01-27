@@ -86,7 +86,7 @@ GLOBAL_CONFIG = {"debug": True}
 ''')
 
         # Create JavaScript file
-        (code_dir / "app.js").write_text('''/**
+        (code_dir / "app.js").write_text("""/**
  * Application entry point.
  *
  * @module app
@@ -128,10 +128,10 @@ const createUser = async (name, email) => {
 };
 
 module.exports = { UserController, createUser };
-''')
+""")
 
         # Create Go file
-        (code_dir / "main.go").write_text('''package main
+        (code_dir / "main.go").write_text("""package main
 
 import (
     "fmt"
@@ -165,10 +165,10 @@ func (s *UserService) CreateUser(name, email string) (*User, error) {
 func main() {
     fmt.Println("Hello, World!")
 }
-''')
+""")
 
         # Create Ruby file
-        (code_dir / "service.rb").write_text('''# User service module
+        (code_dir / "service.rb").write_text("""# User service module
 # Provides user management functionality
 module UserService
   # User repository class
@@ -192,7 +192,7 @@ module UserService
     end
   end
 end
-''')
+""")
 
         # Create subdirectory with files
         (code_dir / "lib").mkdir()

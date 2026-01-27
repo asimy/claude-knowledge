@@ -83,9 +83,7 @@ class SyncManager:
         self._manager = manager
 
     @contextmanager
-    def _file_lock(
-        self, lock_path: Path, timeout: float | None = None
-    ) -> Iterator[None]:
+    def _file_lock(self, lock_path: Path, timeout: float | None = None) -> Iterator[None]:
         """Acquire an exclusive file lock for sync operations.
 
         Uses fcntl on Unix systems for proper file locking.
@@ -119,8 +117,7 @@ class SyncManager:
                         if time.time() - start_time > timeout:
                             lock_fd.close()
                             raise TimeoutError(
-                                f"Could not acquire lock on {lock_file} "
-                                f"within {timeout} seconds"
+                                f"Could not acquire lock on {lock_file} within {timeout} seconds"
                             ) from None
                         time.sleep(0.1)
                 try:
@@ -134,8 +131,7 @@ class SyncManager:
             while lock_file.exists():
                 if time.time() - start_time > timeout:
                     raise TimeoutError(
-                        f"Could not acquire lock on {lock_file} "
-                        f"within {timeout} seconds"
+                        f"Could not acquire lock on {lock_file} within {timeout} seconds"
                     )
                 time.sleep(0.1)
             try:
@@ -163,12 +159,21 @@ class SyncManager:
         with self._file_lock(sync_path / "manifest.json"):
             (sync_path / "entries").mkdir(exist_ok=True)
             (sync_path / "tombstones").mkdir(exist_ok=True)
+            (sync_path / "relationships").mkdir(exist_ok=True)
+            (sync_path / "collections").mkdir(exist_ok=True)
 
             # Create manifest if it doesn't exist
             manifest_path = sync_path / "manifest.json"
             if not manifest_path.exists():
                 self._save_manifest(
-                    sync_path, {"version": 1, "last_sync": {}, "entries": {}}
+                    sync_path,
+                    {
+                        "version": 2,
+                        "last_sync": {},
+                        "entries": {},
+                        "relationships": {},
+                        "collections": {},
+                    },
                 )
 
             # Create tombstones file if it doesn't exist
@@ -551,9 +556,7 @@ class SyncManager:
                 last_synced = local_sync_state.get(entry_id)  # Use local sync state
                 tombstone = tombstones.get(entry_id)
 
-                action = self._categorize_entry(
-                    entry_id, local, remote, last_synced, tombstone
-                )
+                action = self._categorize_entry(entry_id, local, remote, last_synced, tombstone)
 
                 if action == "no_change":
                     continue
@@ -601,11 +604,18 @@ class SyncManager:
                         result,
                     )
 
+            # Sync relationships and collections after entries
+            rel_result = self._sync_relationships(sync_path, dry_run)
+            coll_result = self._sync_collections(sync_path, dry_run)
+
             # Update manifest and local sync state
             if not dry_run:
                 machine_id = get_machine_id()
                 manifest["last_sync"][machine_id] = datetime.now().isoformat()
                 manifest["entries"] = manifest_entries
+                # Store relationship/collection sync state
+                manifest["relationships_synced"] = rel_result
+                manifest["collections_synced"] = coll_result
                 self._save_manifest(sync_path, manifest)
                 self._config.set_local_sync_state(local_sync_state)
 
@@ -825,3 +835,371 @@ class SyncManager:
             if entry_id in local_sync_state:
                 del local_sync_state[entry_id]
         result.deletions_pushed += 1
+
+    # =========================================================================
+    # Relationship Sync
+    # =========================================================================
+
+    def _get_local_relationships(self) -> list[dict[str, Any]]:
+        """Get all local relationships.
+
+        Returns:
+            List of relationship dictionaries.
+        """
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """
+            SELECT id, source_id, target_id, relationship_type, created, metadata
+            FROM knowledge_relationships
+            """
+        )
+        return [dict(row) for row in cursor.fetchall()]
+
+    def _get_remote_relationships(self, sync_path: Path) -> dict[str, dict[str, Any]]:
+        """Get all remote relationships from sync directory.
+
+        Args:
+            sync_path: Path to sync directory.
+
+        Returns:
+            Dictionary mapping relationship ID to relationship data.
+        """
+        rel_dir = sync_path / "relationships"
+        relationships = {}
+
+        if not rel_dir.exists():
+            return relationships
+
+        for rel_file in rel_dir.glob("*.json"):
+            try:
+                with open(rel_file) as f:
+                    rel = json.load(f)
+                    if rel.get("id"):
+                        relationships[rel["id"]] = rel
+            except (json.JSONDecodeError, OSError):
+                continue
+
+        return relationships
+
+    def _write_remote_relationship(self, sync_path: Path, rel: dict[str, Any]) -> None:
+        """Write a relationship to the sync directory.
+
+        Args:
+            sync_path: Path to sync directory.
+            rel: Relationship data.
+        """
+        rel_path = sync_path / "relationships" / f"{rel['id']}.json"
+        with open(rel_path, "w") as f:
+            json.dump(rel, f, indent=2)
+
+    def _delete_remote_relationship(self, sync_path: Path, rel_id: str) -> None:
+        """Delete a relationship from the sync directory.
+
+        Args:
+            sync_path: Path to sync directory.
+            rel_id: Relationship ID.
+        """
+        rel_path = sync_path / "relationships" / f"{rel_id}.json"
+        if rel_path.exists():
+            rel_path.unlink()
+
+    def _sync_relationships(
+        self,
+        sync_path: Path,
+        dry_run: bool = False,
+    ) -> dict[str, int]:
+        """Sync relationships between local and remote.
+
+        Args:
+            sync_path: Path to sync directory.
+            dry_run: If True, don't make changes.
+
+        Returns:
+            Dictionary with pushed/pulled counts.
+        """
+        result = {"pushed": 0, "pulled": 0, "skipped": 0}
+
+        local_rels = {r["id"]: r for r in self._get_local_relationships()}
+        remote_rels = self._get_remote_relationships(sync_path)
+
+        all_ids = set(local_rels.keys()) | set(remote_rels.keys())
+
+        for rel_id in all_ids:
+            local = local_rels.get(rel_id)
+            remote = remote_rels.get(rel_id)
+
+            if local and not remote:
+                # Push local to remote
+                # But first check if both entries exist in remote
+                source_exists = (sync_path / "entries" / f"{local['source_id']}.json").exists()
+                target_exists = (sync_path / "entries" / f"{local['target_id']}.json").exists()
+
+                if source_exists and target_exists:
+                    if not dry_run:
+                        self._write_remote_relationship(sync_path, local)
+                    result["pushed"] += 1
+                else:
+                    result["skipped"] += 1
+
+            elif remote and not local:
+                # Pull remote to local
+                # But first check if both entries exist locally
+                source_exists = self._manager.get(remote["source_id"]) is not None
+                target_exists = self._manager.get(remote["target_id"]) is not None
+
+                if source_exists and target_exists:
+                    if not dry_run:
+                        self._import_relationship(remote)
+                    result["pulled"] += 1
+                else:
+                    result["skipped"] += 1
+
+        return result
+
+    def _import_relationship(self, rel: dict[str, Any]) -> None:
+        """Import a relationship from sync format.
+
+        Args:
+            rel: Relationship dictionary.
+        """
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute(
+                """
+                INSERT OR IGNORE INTO knowledge_relationships
+                (id, source_id, target_id, relationship_type, created, metadata)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    rel["id"],
+                    rel["source_id"],
+                    rel["target_id"],
+                    rel["relationship_type"],
+                    rel.get("created"),
+                    rel.get("metadata"),
+                ),
+            )
+            self.conn.commit()
+        except Exception:
+            pass  # Ignore duplicates and other errors
+
+    # =========================================================================
+    # Collection Sync
+    # =========================================================================
+
+    def _get_local_collections(self) -> list[dict[str, Any]]:
+        """Get all local collections with their members.
+
+        Returns:
+            List of collection dictionaries with member_ids.
+        """
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """
+            SELECT id, name, description, created, updated_at
+            FROM knowledge_collections
+            """
+        )
+        collections = []
+        for row in cursor.fetchall():
+            coll = dict(row)
+            # Get member IDs
+            cursor.execute(
+                "SELECT entry_id FROM collection_members WHERE collection_id = ?",
+                (coll["id"],),
+            )
+            coll["member_ids"] = [r[0] for r in cursor.fetchall()]
+            collections.append(coll)
+        return collections
+
+    def _get_remote_collections(self, sync_path: Path) -> dict[str, dict[str, Any]]:
+        """Get all remote collections from sync directory.
+
+        Args:
+            sync_path: Path to sync directory.
+
+        Returns:
+            Dictionary mapping collection ID to collection data.
+        """
+        coll_dir = sync_path / "collections"
+        collections = {}
+
+        if not coll_dir.exists():
+            return collections
+
+        for coll_file in coll_dir.glob("*.json"):
+            try:
+                with open(coll_file) as f:
+                    coll = json.load(f)
+                    if coll.get("id"):
+                        collections[coll["id"]] = coll
+            except (json.JSONDecodeError, OSError):
+                continue
+
+        return collections
+
+    def _write_remote_collection(self, sync_path: Path, coll: dict[str, Any]) -> None:
+        """Write a collection to the sync directory.
+
+        Args:
+            sync_path: Path to sync directory.
+            coll: Collection data with member_ids.
+        """
+        coll_path = sync_path / "collections" / f"{coll['id']}.json"
+        with open(coll_path, "w") as f:
+            json.dump(coll, f, indent=2)
+
+    def _delete_remote_collection(self, sync_path: Path, coll_id: str) -> None:
+        """Delete a collection from the sync directory.
+
+        Args:
+            sync_path: Path to sync directory.
+            coll_id: Collection ID.
+        """
+        coll_path = sync_path / "collections" / f"{coll_id}.json"
+        if coll_path.exists():
+            coll_path.unlink()
+
+    def _sync_collections(
+        self,
+        sync_path: Path,
+        dry_run: bool = False,
+    ) -> dict[str, int]:
+        """Sync collections between local and remote.
+
+        Args:
+            sync_path: Path to sync directory.
+            dry_run: If True, don't make changes.
+
+        Returns:
+            Dictionary with pushed/pulled counts.
+        """
+        result = {"pushed": 0, "pulled": 0, "updated": 0}
+
+        local_colls = {c["id"]: c for c in self._get_local_collections()}
+        remote_colls = self._get_remote_collections(sync_path)
+
+        all_ids = set(local_colls.keys()) | set(remote_colls.keys())
+
+        for coll_id in all_ids:
+            local = local_colls.get(coll_id)
+            remote = remote_colls.get(coll_id)
+
+            if local and not remote:
+                # Push local to remote
+                if not dry_run:
+                    self._write_remote_collection(sync_path, local)
+                result["pushed"] += 1
+
+            elif remote and not local:
+                # Pull remote to local
+                if not dry_run:
+                    self._import_collection(remote)
+                result["pulled"] += 1
+
+            elif local and remote:
+                # Both exist - merge members using last-write-wins for the collection itself
+                local_updated = local.get("updated_at", "")
+                remote_updated = remote.get("updated_at", "")
+
+                if local_updated >= remote_updated:
+                    # Push local version
+                    if not dry_run:
+                        self._write_remote_collection(sync_path, local)
+                    result["updated"] += 1
+                else:
+                    # Pull remote version
+                    if not dry_run:
+                        self._update_collection_from_remote(remote)
+                    result["updated"] += 1
+
+        return result
+
+    def _import_collection(self, coll: dict[str, Any]) -> None:
+        """Import a collection from sync format.
+
+        Args:
+            coll: Collection dictionary with member_ids.
+        """
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute(
+                """
+                INSERT OR IGNORE INTO knowledge_collections
+                (id, name, description, created, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    coll["id"],
+                    coll["name"],
+                    coll.get("description", ""),
+                    coll.get("created"),
+                    coll.get("updated_at"),
+                ),
+            )
+
+            # Add members (only if entry exists locally)
+            for entry_id in coll.get("member_ids", []):
+                if self._manager.get(entry_id):
+                    try:
+                        cursor.execute(
+                            """
+                            INSERT OR IGNORE INTO collection_members
+                            (collection_id, entry_id, added_at)
+                            VALUES (?, ?, ?)
+                            """,
+                            (coll["id"], entry_id, datetime.now().isoformat()),
+                        )
+                    except Exception:
+                        pass
+
+            self.conn.commit()
+        except Exception:
+            pass  # Ignore errors
+
+    def _update_collection_from_remote(self, coll: dict[str, Any]) -> None:
+        """Update a local collection from remote data.
+
+        Args:
+            coll: Collection dictionary with member_ids.
+        """
+        cursor = self.conn.cursor()
+        try:
+            # Update collection metadata
+            cursor.execute(
+                """
+                UPDATE knowledge_collections
+                SET name = ?, description = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    coll["name"],
+                    coll.get("description", ""),
+                    coll.get("updated_at"),
+                    coll["id"],
+                ),
+            )
+
+            # Sync members - remove existing and add from remote
+            cursor.execute(
+                "DELETE FROM collection_members WHERE collection_id = ?",
+                (coll["id"],),
+            )
+
+            for entry_id in coll.get("member_ids", []):
+                if self._manager.get(entry_id):
+                    try:
+                        cursor.execute(
+                            """
+                            INSERT INTO collection_members
+                            (collection_id, entry_id, added_at)
+                            VALUES (?, ?, ?)
+                            """,
+                            (coll["id"], entry_id, datetime.now().isoformat()),
+                        )
+                    except Exception:
+                        pass
+
+            self.conn.commit()
+        except Exception:
+            pass

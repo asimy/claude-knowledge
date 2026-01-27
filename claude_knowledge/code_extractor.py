@@ -487,7 +487,8 @@ class CodeExtractor:
 
                     # Check method patterns (look at methods in same file)
                     methods = [
-                        e for e in parsed_file.elements
+                        e
+                        for e in parsed_file.elements
                         if e.element_type == "method" and e.parent == element.name
                     ]
                     method_names = [m.name.lower() for m in methods]

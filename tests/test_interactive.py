@@ -166,11 +166,11 @@ class TestShowPreview:
 class TestGetDistinctProjects:
     """Tests for KnowledgeManager.get_distinct_projects."""
 
-    def test_returns_project_list(self, tmp_path):
+    def test_returns_project_list(self, tmp_path, shared_embedding_service):
         """Returns list of distinct projects."""
         from claude_knowledge.knowledge_manager import KnowledgeManager
 
-        km = KnowledgeManager(base_path=str(tmp_path))
+        km = KnowledgeManager(base_path=str(tmp_path), embedding_service=shared_embedding_service)
         km.capture(
             title="Test 1",
             description="Desc",
@@ -197,11 +197,11 @@ class TestGetDistinctProjects:
         assert len(projects) == 2
         km.close()
 
-    def test_excludes_empty_projects(self, tmp_path):
+    def test_excludes_empty_projects(self, tmp_path, shared_embedding_service):
         """Excludes empty and null projects."""
         from claude_knowledge.knowledge_manager import KnowledgeManager
 
-        km = KnowledgeManager(base_path=str(tmp_path))
+        km = KnowledgeManager(base_path=str(tmp_path), embedding_service=shared_embedding_service)
         km.capture(
             title="Test 1",
             description="Desc",

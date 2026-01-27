@@ -20,9 +20,14 @@ class EmbeddingService:
 
     EMBEDDING_MODEL = "all-MiniLM-L6-v2"
 
-    def __init__(self) -> None:
-        """Initialize the embedding service with lazy model loading."""
-        self._model: SentenceTransformer | None = None
+    def __init__(self, model: SentenceTransformer | None = None) -> None:
+        """Initialize the embedding service.
+
+        Args:
+            model: Optional pre-loaded SentenceTransformer model.
+                   If None, model will be lazy-loaded on first use.
+        """
+        self._model: SentenceTransformer | None = model
 
     @property
     def model(self) -> SentenceTransformer:
