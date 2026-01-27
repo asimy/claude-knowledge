@@ -5,7 +5,7 @@ import tempfile
 
 import pytest
 
-from claude_knowledge.knowledge_manager import KnowledgeManager
+from claude_knowledge.knowledge_manager import EmbeddingError, KnowledgeManager
 from claude_knowledge.utils import (
     create_brief,
     escape_like_pattern,
@@ -138,6 +138,27 @@ class TestKnowledgeManagerInit:
     def test_init_creates_database(self, temp_km):
         """Test that SQLite database is created."""
         assert temp_km.sqlite_path.exists()
+
+
+class TestEmbeddingError:
+    """Tests for embedding error handling."""
+
+    def test_embedding_error_is_raised_for_empty_text(self, temp_km):
+        """Test that EmbeddingError is raised for empty text."""
+        with pytest.raises(EmbeddingError, match="empty text"):
+            temp_km._generate_embedding("")
+
+    def test_embedding_error_is_raised_for_whitespace_only(self, temp_km):
+        """Test that EmbeddingError is raised for whitespace-only text."""
+        with pytest.raises(EmbeddingError, match="empty text"):
+            temp_km._generate_embedding("   \n\t   ")
+
+    def test_embedding_succeeds_for_valid_text(self, temp_km):
+        """Test that embedding generation succeeds for valid text."""
+        embedding = temp_km._generate_embedding("This is valid text")
+        assert isinstance(embedding, list)
+        assert len(embedding) > 0
+        assert all(isinstance(x, float) for x in embedding)
 
 
 class TestCapture:

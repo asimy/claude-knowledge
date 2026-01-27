@@ -40,6 +40,12 @@ from claude_knowledge.utils import (
 )
 
 
+class EmbeddingError(Exception):
+    """Raised when embedding generation fails."""
+
+    pass
+
+
 @dataclass
 class SyncResult:
     """Result of a sync operation."""
@@ -278,9 +284,21 @@ class KnowledgeManager:
 
     @property
     def model(self) -> SentenceTransformer:
-        """Lazy-load the embedding model on first use."""
+        """Lazy-load the embedding model on first use.
+
+        Returns:
+            The initialized SentenceTransformer model.
+
+        Raises:
+            EmbeddingError: If the model fails to load.
+        """
         if self._model is None:
-            self._model = SentenceTransformer(self.EMBEDDING_MODEL)
+            try:
+                self._model = SentenceTransformer(self.EMBEDDING_MODEL)
+            except Exception as e:
+                raise EmbeddingError(
+                    f"Failed to load embedding model '{self.EMBEDDING_MODEL}': {e}"
+                ) from e
         return self._model
 
     def _validate_date_field(self, date_field: str) -> None:
@@ -371,10 +389,21 @@ class KnowledgeManager:
 
         Returns:
             Embedding vector as list of floats.
+
+        Raises:
+            EmbeddingError: If text is empty after sanitization or encoding fails.
         """
         clean_text = sanitize_for_embedding(text)
-        embedding = self.model.encode(clean_text, convert_to_numpy=True)
-        return embedding.tolist()
+        if not clean_text:
+            raise EmbeddingError("Cannot generate embedding for empty text")
+
+        try:
+            embedding = self.model.encode(clean_text, convert_to_numpy=True)
+            return embedding.tolist()
+        except EmbeddingError:
+            raise
+        except Exception as e:
+            raise EmbeddingError(f"Failed to encode text: {e}") from e
 
     def _create_embedding_text(self, title: str, description: str, content: str) -> str:
         """Create combined text for embedding generation.
