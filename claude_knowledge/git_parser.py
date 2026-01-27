@@ -133,8 +133,19 @@ class GitParser:
 
         Args:
             repo_path: Path to the git repository. Defaults to current directory.
+
+        Raises:
+            ValueError: If the path does not exist or is not a directory.
         """
-        self.repo_path = Path(repo_path).resolve() if repo_path else Path.cwd()
+        if repo_path is not None:
+            resolved = Path(repo_path).resolve()
+            if not resolved.exists():
+                raise ValueError(f"Repository path does not exist: {repo_path}")
+            if not resolved.is_dir():
+                raise ValueError(f"Repository path is not a directory: {repo_path}")
+            self.repo_path = resolved
+        else:
+            self.repo_path = Path.cwd()
 
     def _run_git(
         self,

@@ -109,8 +109,19 @@ class CodeParser:
             base_path: Base directory to scan. Defaults to current directory.
             include_patterns: Glob patterns for files to include.
             exclude_patterns: Glob patterns for files to exclude.
+
+        Raises:
+            ValueError: If the path does not exist or is not a directory.
         """
-        self.base_path = Path(base_path).resolve() if base_path else Path.cwd()
+        if base_path is not None:
+            resolved = Path(base_path).resolve()
+            if not resolved.exists():
+                raise ValueError(f"Base path does not exist: {base_path}")
+            if not resolved.is_dir():
+                raise ValueError(f"Base path is not a directory: {base_path}")
+            self.base_path = resolved
+        else:
+            self.base_path = Path.cwd()
         self.include_patterns = include_patterns or ["*"]
         self.exclude_patterns = exclude_patterns or self.DEFAULT_EXCLUDES
 

@@ -311,6 +311,23 @@ class TestGitParser:
         for commit in commits:
             assert commit.diffs is not None
 
+    def test_repo_path_validation_nonexistent(self):
+        """Test that GitParser raises ValueError for nonexistent path."""
+        with pytest.raises(ValueError, match="does not exist"):
+            GitParser("/nonexistent/path/to/repo")
+
+    def test_repo_path_validation_file_not_directory(self, temp_git_repo):
+        """Test that GitParser raises ValueError when path is a file."""
+        file_path = temp_git_repo / "somefile.txt"
+        file_path.write_text("content")
+        with pytest.raises(ValueError, match="not a directory"):
+            GitParser(file_path)
+
+    def test_repo_path_defaults_to_cwd(self):
+        """Test that GitParser defaults to current working directory."""
+        parser = GitParser()
+        assert parser.repo_path == Path.cwd()
+
 
 class TestGitParserDiffParsing:
     """Tests for diff parsing functionality."""

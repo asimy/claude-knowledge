@@ -438,6 +438,22 @@ class TestCodeParser:
         assert parser._detect_language(Path("test.rb")) == "ruby"
         assert parser._detect_language(Path("test.txt")) is None
 
+    def test_base_path_validation_nonexistent(self):
+        """Test that CodeParser raises ValueError for nonexistent path."""
+        with pytest.raises(ValueError, match="does not exist"):
+            CodeParser("/nonexistent/path/to/code")
+
+    def test_base_path_validation_file_not_directory(self, temp_code_dir):
+        """Test that CodeParser raises ValueError when path is a file."""
+        file_path = temp_code_dir / "main.py"
+        with pytest.raises(ValueError, match="not a directory"):
+            CodeParser(file_path)
+
+    def test_base_path_defaults_to_cwd(self):
+        """Test that CodeParser defaults to current working directory."""
+        parser = CodeParser()
+        assert parser.base_path == Path.cwd()
+
 
 class TestCodeParserPythonParsing:
     """Tests for Python-specific parsing."""

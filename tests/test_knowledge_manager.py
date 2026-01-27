@@ -190,6 +190,46 @@ class TestCapture:
         assert item["brief"] is not None
         assert len(item["brief"]) <= 203  # 200 + "..."
 
+    def test_capture_rejects_title_too_long(self, temp_km):
+        """Test that capture rejects title exceeding maximum length."""
+        long_title = "A" * (temp_km.MAX_TITLE_LENGTH + 1)
+        with pytest.raises(ValueError, match="title exceeds maximum length"):
+            temp_km.capture(
+                title=long_title,
+                description="A test description",
+                content="Test content",
+            )
+
+    def test_capture_rejects_description_too_long(self, temp_km):
+        """Test that capture rejects description exceeding maximum length."""
+        long_desc = "A" * (temp_km.MAX_DESCRIPTION_LENGTH + 1)
+        with pytest.raises(ValueError, match="description exceeds maximum length"):
+            temp_km.capture(
+                title="Test Title",
+                description=long_desc,
+                content="Test content",
+            )
+
+    def test_capture_rejects_content_too_long(self, temp_km):
+        """Test that capture rejects content exceeding maximum length."""
+        long_content = "A" * (temp_km.MAX_CONTENT_LENGTH + 1)
+        with pytest.raises(ValueError, match="content exceeds maximum length"):
+            temp_km.capture(
+                title="Test Title",
+                description="A test description",
+                content=long_content,
+            )
+
+    def test_capture_accepts_content_at_limit(self, temp_km):
+        """Test that capture accepts content at exactly the maximum length."""
+        max_content = "A" * temp_km.MAX_CONTENT_LENGTH
+        kid = temp_km.capture(
+            title="Test Title",
+            description="A test description",
+            content=max_content,
+        )
+        assert len(kid) == 12
+
 
 class TestRetrieve:
     """Tests for the retrieve method."""

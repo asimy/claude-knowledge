@@ -55,10 +55,40 @@ class SyncResult:
 class KnowledgeManager:
     """Manages knowledge storage and retrieval using ChromaDB and SQLite."""
 
+    # Core configuration
     EMBEDDING_MODEL = "all-MiniLM-L6-v2"
     COLLECTION_NAME = "knowledge"
-    # Whitelist of allowed date fields for SQL queries (prevents SQL injection)
+
+    # SQL injection prevention
     ALLOWED_DATE_FIELDS = frozenset({"created", "last_used"})
+
+    # Input size limits for capture() to prevent resource exhaustion
+    MAX_TITLE_LENGTH = 500
+    MAX_DESCRIPTION_LENGTH = 10_000
+    MAX_CONTENT_LENGTH = 1_000_000  # ~1MB of text
+
+    # Default values for retrieval and search
+    DEFAULT_TOKEN_BUDGET = 2000
+    DEFAULT_RETRIEVE_RESULTS = 5
+    DEFAULT_MIN_SCORE = 0.3
+    DEFAULT_LIST_LIMIT = 50
+    DEFAULT_SEARCH_LIMIT = 20
+
+    # Duplicate detection
+    DEFAULT_DUPLICATE_THRESHOLD = 0.85
+    MAX_DUPLICATE_CHECK_ENTRIES = 1000
+    DEFAULT_DUPLICATE_COMPARISON_LIMIT = 20
+
+    # Staleness tracking
+    DEFAULT_STALE_DAYS = 90
+
+    # Quality scoring (each component contributes this many points out of 100)
+    QUALITY_SCORE_WEIGHT = 25
+    MIN_DESCRIPTION_LENGTH_FOR_QUALITY = 50
+    MIN_CONTENT_LENGTH_FOR_QUALITY = 100
+
+    # File locking
+    DEFAULT_FILE_LOCK_TIMEOUT = 30.0
 
     def __init__(self, base_path: str = "~/.claude_knowledge"):
         """Initialize the knowledge manager.
@@ -269,7 +299,9 @@ class KnowledgeManager:
             )
 
     @contextmanager
-    def _file_lock(self, lock_path: Path, timeout: float = 30.0) -> Iterator[None]:
+    def _file_lock(
+        self, lock_path: Path, timeout: float | None = None
+    ) -> Iterator[None]:
         """Acquire an exclusive file lock for sync operations.
 
         Uses fcntl on Unix systems for proper file locking.
@@ -277,7 +309,8 @@ class KnowledgeManager:
 
         Args:
             lock_path: Path to the lock file.
-            timeout: Maximum seconds to wait for lock (default: 30).
+            timeout: Maximum seconds to wait for lock.
+                Defaults to DEFAULT_FILE_LOCK_TIMEOUT.
 
         Yields:
             None when lock is acquired.
@@ -285,6 +318,8 @@ class KnowledgeManager:
         Raises:
             TimeoutError: If lock cannot be acquired within timeout.
         """
+        if timeout is None:
+            timeout = self.DEFAULT_FILE_LOCK_TIMEOUT
         lock_file = lock_path.with_suffix(".lock")
         start_time = time.time()
 
@@ -392,6 +427,20 @@ class KnowledgeManager:
             raise ValueError("content cannot be empty")
         if not 0.0 <= confidence <= 1.0:
             raise ValueError("confidence must be between 0.0 and 1.0")
+
+        # Validate input size limits
+        if len(title) > self.MAX_TITLE_LENGTH:
+            raise ValueError(
+                f"title exceeds maximum length of {self.MAX_TITLE_LENGTH} characters"
+            )
+        if len(description) > self.MAX_DESCRIPTION_LENGTH:
+            raise ValueError(
+                f"description exceeds maximum length of {self.MAX_DESCRIPTION_LENGTH} characters"
+            )
+        if len(content) > self.MAX_CONTENT_LENGTH:
+            raise ValueError(
+                f"content exceeds maximum length of {self.MAX_CONTENT_LENGTH} characters"
+            )
 
         timestamp = datetime.now()
         knowledge_id = generate_id(title, timestamp)
@@ -501,42 +550,54 @@ class KnowledgeManager:
         ids = results["ids"][0]
         distances = results["distances"][0] if results["distances"] else []
 
+        # Build score map and filter by min_score
+        id_scores: dict[str, float] = {}
         for i, knowledge_id in enumerate(ids):
-            # Calculate relevance score (1 - cosine distance)
             distance = distances[i] if i < len(distances) else 0.5
             score = 1 - distance
+            if score >= min_score:
+                id_scores[knowledge_id] = score
 
-            if score < min_score:
+        if not id_scores:
+            return []
+
+        # Batch fetch all metadata from SQLite (fixes N+1 query problem)
+        cursor = self.conn.cursor()
+        placeholders = ",".join("?" * len(id_scores))
+        cursor.execute(
+            f"SELECT * FROM knowledge WHERE id IN ({placeholders})",
+            list(id_scores.keys()),
+        )
+        rows = {row["id"]: dict(row) for row in cursor.fetchall()}
+
+        # Process rows with scores and apply filters
+        for knowledge_id, score in id_scores.items():
+            row = rows.get(knowledge_id)
+            if not row:
                 continue
 
-            # Fetch full metadata from SQLite
-            cursor = self.conn.cursor()
-            cursor.execute("SELECT * FROM knowledge WHERE id = ?", (knowledge_id,))
-            row = cursor.fetchone()
+            item = row
+            item["score"] = score
 
-            if row:
-                item = dict(row)
-                item["score"] = score
+            # Apply tag filter
+            if tags:
+                item_tags = json_to_tags(item.get("tags"))
+                if fuzzy:
+                    if not fuzzy_match_tags(tags, item_tags):
+                        continue
+                elif not all(tag in item_tags for tag in tags):
+                    continue
 
-                # Apply tag filter
-                if tags:
-                    item_tags = json_to_tags(item.get("tags"))
-                    if fuzzy:
-                        if not fuzzy_match_tags(tags, item_tags):
-                            continue
-                    elif not all(tag in item_tags for tag in tags):
+            # Apply date filter
+            if since or until:
+                date_value = item.get(date_field)
+                if date_value:
+                    if since and date_value < since:
+                        continue
+                    if until and date_value > until:
                         continue
 
-                # Apply date filter
-                if since or until:
-                    date_value = item.get(date_field)
-                    if date_value:
-                        if since and date_value < since:
-                            continue
-                        if until and date_value > until:
-                            continue
-
-                items.append(item)
+            items.append(item)
 
         # Sort by score
         items.sort(key=lambda x: x["score"], reverse=True)
@@ -965,20 +1026,23 @@ class KnowledgeManager:
 
     def find_duplicates(
         self,
-        threshold: float = 0.85,
+        threshold: float | None = None,
         project: str | None = None,
     ) -> list[list[dict[str, Any]]]:
         """Find potential duplicate entries based on semantic similarity.
 
         Args:
             threshold: Minimum similarity score (0.0-1.0) to consider as duplicate.
+                Defaults to DEFAULT_DUPLICATE_THRESHOLD.
             project: Optional project filter.
 
         Returns:
             List of duplicate groups, where each group is a list of similar entries
             with their similarity scores.
         """
-        entries = self.list_all(project=project, limit=1000)
+        if threshold is None:
+            threshold = self.DEFAULT_DUPLICATE_THRESHOLD
+        entries = self.list_all(project=project, limit=self.MAX_DUPLICATE_CHECK_ENTRIES)
         if len(entries) < 2:
             return []
 
@@ -1005,7 +1069,7 @@ class KnowledgeManager:
             # Get more results than needed to find all duplicates
             results = self.collection.query(
                 query_embeddings=[query_embedding],
-                n_results=min(len(entries), 20),
+                n_results=min(len(entries), self.DEFAULT_DUPLICATE_COMPARISON_LIMIT),
                 include=["distances"],
             )
 
@@ -1047,13 +1111,14 @@ class KnowledgeManager:
 
     def find_stale(
         self,
-        days: int = 90,
+        days: int | None = None,
         project: str | None = None,
     ) -> list[dict[str, Any]]:
         """Find entries that haven't been used or updated recently.
 
         Args:
             days: Number of days to consider an entry stale.
+                Defaults to DEFAULT_STALE_DAYS.
             project: Optional project filter.
 
         Returns:
@@ -1061,6 +1126,8 @@ class KnowledgeManager:
         """
         from datetime import timedelta
 
+        if days is None:
+            days = self.DEFAULT_STALE_DAYS
         cutoff = (datetime.now() - timedelta(days=days)).isoformat()
 
         cursor = self.conn.cursor()
@@ -1186,11 +1253,11 @@ class KnowledgeManager:
     ) -> list[dict[str, Any]]:
         """Score entries by quality based on completeness metrics.
 
-        Quality score (0-100) is calculated from:
-        - Tags present (25 points)
-        - Description length >= 50 chars (25 points)
-        - Content length >= 100 chars (25 points)
-        - Usage count > 0 (25 points)
+        Quality score (0-100) is calculated from (QUALITY_SCORE_WEIGHT points each):
+        - Tags present
+        - Description length >= MIN_DESCRIPTION_LENGTH_FOR_QUALITY chars
+        - Content length >= MIN_CONTENT_LENGTH_FOR_QUALITY chars
+        - Usage count > 0
 
         Args:
             project: Optional project filter.
@@ -1227,26 +1294,26 @@ class KnowledgeManager:
             entry = dict(row)
             score = 0
 
-            # Tags present: 25 points
+            # Tags present: QUALITY_SCORE_WEIGHT points
             tags_json = entry.get("tags") or "[]"
             tags_list = json_to_tags(tags_json)
             if tags_list:
-                score += 25
+                score += self.QUALITY_SCORE_WEIGHT
 
-            # Description length >= 50 chars: 25 points
+            # Description length >= MIN_DESCRIPTION_LENGTH_FOR_QUALITY: QUALITY_SCORE_WEIGHT points
             description = entry.get("description") or ""
-            if len(description) >= 50:
-                score += 25
+            if len(description) >= self.MIN_DESCRIPTION_LENGTH_FOR_QUALITY:
+                score += self.QUALITY_SCORE_WEIGHT
 
-            # Content length >= 100 chars: 25 points
+            # Content length >= MIN_CONTENT_LENGTH_FOR_QUALITY: QUALITY_SCORE_WEIGHT points
             content = entry.get("content") or ""
-            if len(content) >= 100:
-                score += 25
+            if len(content) >= self.MIN_CONTENT_LENGTH_FOR_QUALITY:
+                score += self.QUALITY_SCORE_WEIGHT
 
-            # Usage count > 0: 25 points
+            # Usage count > 0: QUALITY_SCORE_WEIGHT points
             usage_count = entry.get("usage_count") or 0
             if usage_count > 0:
-                score += 25
+                score += self.QUALITY_SCORE_WEIGHT
 
             entry["quality_score"] = score
 
