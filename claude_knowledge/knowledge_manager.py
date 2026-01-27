@@ -1,30 +1,22 @@
 """Core knowledge management functionality."""
 
-import json
 import sqlite3
-import sys
-import time
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-
-# File locking - platform specific
-if sys.platform != "win32":
-    import fcntl
-
-    HAS_FCNTL = True
-else:
-    HAS_FCNTL = False
 
 import chromadb
 from chromadb.config import Settings
 from sentence_transformers import SentenceTransformer
 
+from claude_knowledge._config import ConfigManager
+from claude_knowledge._embedding import EmbeddingError, EmbeddingService
+from claude_knowledge._maintenance import MaintenanceService
+from claude_knowledge._sync import SyncManager, SyncResult
+from claude_knowledge._tracking import ProcessingTracker
 from claude_knowledge.utils import (
-    compute_content_hash,
     context_to_json,
     create_brief,
     escape_like_pattern,
@@ -32,30 +24,12 @@ from claude_knowledge.utils import (
     format_knowledge_item,
     fuzzy_match_tags,
     generate_id,
-    get_machine_id,
-    json_to_context,
     json_to_tags,
-    sanitize_for_embedding,
     tags_to_json,
 )
 
-
-class EmbeddingError(Exception):
-    """Raised when embedding generation fails."""
-
-    pass
-
-
-@dataclass
-class SyncResult:
-    """Result of a sync operation."""
-
-    pushed: int = 0
-    pulled: int = 0
-    conflicts: list[dict[str, Any]] = field(default_factory=list)
-    deletions_pushed: int = 0
-    deletions_pulled: int = 0
-    errors: list[str] = field(default_factory=list)
+# Re-export EmbeddingError for backward compatibility
+__all__ = ["KnowledgeManager", "EmbeddingError", "SyncResult"]
 
 
 class KnowledgeManager:
@@ -111,7 +85,11 @@ class KnowledgeManager:
         # Initialize components
         self._init_chroma()
         self._init_sqlite()
+        self._init_config()
         self._init_embedding_model()
+        self._init_tracker()
+        self._init_maintenance()
+        self._init_sync()
 
     def _init_chroma(self) -> None:
         """Initialize ChromaDB client and collection."""
@@ -212,20 +190,17 @@ class KnowledgeManager:
             cursor.execute("UPDATE knowledge SET updated_at = created WHERE updated_at IS NULL")
             self.conn.commit()
 
+    def _init_config(self) -> None:
+        """Initialize the configuration manager."""
+        self._config = ConfigManager(self.base_path)
+
     def _load_config(self) -> dict[str, Any]:
         """Load configuration from config.json.
 
         Returns:
             Configuration dictionary.
         """
-        config_path = self.base_path / "config.json"
-        if config_path.exists():
-            try:
-                with open(config_path) as f:
-                    return json.load(f)
-            except (json.JSONDecodeError, OSError):
-                return {}
-        return {}
+        return self._config.load_config()
 
     def _save_config(self, config: dict[str, Any]) -> None:
         """Save configuration to config.json.
@@ -233,9 +208,7 @@ class KnowledgeManager:
         Args:
             config: Configuration dictionary to save.
         """
-        config_path = self.base_path / "config.json"
-        with open(config_path, "w") as f:
-            json.dump(config, f, indent=2)
+        self._config.save_config(config)
 
     def get_sync_path(self) -> Path | None:
         """Get the saved sync path from config.
@@ -243,11 +216,7 @@ class KnowledgeManager:
         Returns:
             Path to sync directory, or None if not configured.
         """
-        config = self._load_config()
-        sync_path = config.get("sync_path")
-        if sync_path:
-            return Path(sync_path).expanduser()
-        return None
+        return self._config.get_sync_path()
 
     def set_sync_path(self, path: Path) -> None:
         """Save the sync path to config.
@@ -255,9 +224,7 @@ class KnowledgeManager:
         Args:
             path: Path to sync directory.
         """
-        config = self._load_config()
-        config["sync_path"] = str(path)
-        self._save_config(config)
+        self._config.set_sync_path(path)
 
     def _get_local_sync_state(self) -> dict[str, dict[str, Any]]:
         """Get the local record of what was last synced.
@@ -265,8 +232,7 @@ class KnowledgeManager:
         Returns:
             Dictionary mapping entry ID to {content_hash, updated_at}.
         """
-        config = self._load_config()
-        return config.get("sync_state", {})
+        return self._config.get_local_sync_state()
 
     def _set_local_sync_state(self, state: dict[str, dict[str, Any]]) -> None:
         """Save the local record of what was last synced.
@@ -274,13 +240,27 @@ class KnowledgeManager:
         Args:
             state: Dictionary mapping entry ID to sync state.
         """
-        config = self._load_config()
-        config["sync_state"] = state
-        self._save_config(config)
+        self._config.set_local_sync_state(state)
 
     def _init_embedding_model(self) -> None:
-        """Initialize the sentence-transformers embedding model."""
-        self._model = None
+        """Initialize the embedding service."""
+        self._embedding = EmbeddingService()
+
+    def _init_tracker(self) -> None:
+        """Initialize the processing tracker."""
+        self._tracker = ProcessingTracker(self.conn)
+
+    def _init_maintenance(self) -> None:
+        """Initialize the maintenance service."""
+        self._maintenance = MaintenanceService(
+            self.conn, self.collection, self._embedding, self
+        )
+
+    def _init_sync(self) -> None:
+        """Initialize the sync manager."""
+        self._sync = SyncManager(
+            self.conn, self.collection, self._embedding, self._config, self
+        )
 
     @property
     def model(self) -> SentenceTransformer:
@@ -291,15 +271,12 @@ class KnowledgeManager:
 
         Raises:
             EmbeddingError: If the model fails to load.
+
+        Note:
+            This property is kept for backward compatibility.
+            The model is managed by the EmbeddingService.
         """
-        if self._model is None:
-            try:
-                self._model = SentenceTransformer(self.EMBEDDING_MODEL)
-            except Exception as e:
-                raise EmbeddingError(
-                    f"Failed to load embedding model '{self.EMBEDDING_MODEL}': {e}"
-                ) from e
-        return self._model
+        return self._embedding.model
 
     def _validate_date_field(self, date_field: str) -> None:
         """Validate that date_field is in the allowed whitelist.
@@ -336,50 +313,8 @@ class KnowledgeManager:
         Raises:
             TimeoutError: If lock cannot be acquired within timeout.
         """
-        if timeout is None:
-            timeout = self.DEFAULT_FILE_LOCK_TIMEOUT
-        lock_file = lock_path.with_suffix(".lock")
-        start_time = time.time()
-
-        if HAS_FCNTL:
-            # Unix: Use fcntl for proper file locking
-            lock_fd = open(lock_file, "w")
-            try:
-                while True:
-                    try:
-                        fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                        break
-                    except OSError:
-                        if time.time() - start_time > timeout:
-                            lock_fd.close()
-                            raise TimeoutError(
-                                f"Could not acquire lock on {lock_file} "
-                                f"within {timeout} seconds"
-                            ) from None
-                        time.sleep(0.1)
-                try:
-                    yield
-                finally:
-                    fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
-            finally:
-                lock_fd.close()
-        else:
-            # Windows: Simple lock file mechanism
-            while lock_file.exists():
-                if time.time() - start_time > timeout:
-                    raise TimeoutError(
-                        f"Could not acquire lock on {lock_file} "
-                        f"within {timeout} seconds"
-                    )
-                time.sleep(0.1)
-            try:
-                lock_file.write_text(str(datetime.now().isoformat()))
-                yield
-            finally:
-                try:
-                    lock_file.unlink()
-                except OSError:
-                    pass  # Lock file may already be removed
+        with self._sync._file_lock(lock_path, timeout):
+            yield
 
     def _generate_embedding(self, text: str) -> list[float]:
         """Generate embedding vector for text.
@@ -393,17 +328,7 @@ class KnowledgeManager:
         Raises:
             EmbeddingError: If text is empty after sanitization or encoding fails.
         """
-        clean_text = sanitize_for_embedding(text)
-        if not clean_text:
-            raise EmbeddingError("Cannot generate embedding for empty text")
-
-        try:
-            embedding = self.model.encode(clean_text, convert_to_numpy=True)
-            return embedding.tolist()
-        except EmbeddingError:
-            raise
-        except Exception as e:
-            raise EmbeddingError(f"Failed to encode text: {e}") from e
+        return self._embedding.generate_embedding(text)
 
     def _create_embedding_text(self, title: str, description: str, content: str) -> str:
         """Create combined text for embedding generation.
@@ -416,7 +341,7 @@ class KnowledgeManager:
         Returns:
             Combined text for embedding.
         """
-        return f"{title}. {description}. {content}"
+        return self._embedding.create_embedding_text(title, description, content)
 
     def capture(
         self,
@@ -998,60 +923,7 @@ class KnowledgeManager:
         Returns:
             Dictionary with statistics.
         """
-        cursor = self.conn.cursor()
-
-        # Total count
-        cursor.execute("SELECT COUNT(*) FROM knowledge")
-        total = cursor.fetchone()[0]
-
-        # By project
-        cursor.execute("""
-            SELECT project, COUNT(*) as count
-            FROM knowledge
-            GROUP BY project
-            ORDER BY count DESC
-        """)
-        by_project = {row[0] or "(no project)": row[1] for row in cursor.fetchall()}
-
-        # Most used
-        cursor.execute("""
-            SELECT id, title, usage_count
-            FROM knowledge
-            ORDER BY usage_count DESC
-            LIMIT 5
-        """)
-        most_used = [
-            {"id": row[0], "title": row[1], "usage_count": row[2]} for row in cursor.fetchall()
-        ]
-
-        # Recently added
-        cursor.execute("""
-            SELECT id, title, created
-            FROM knowledge
-            ORDER BY created DESC
-            LIMIT 5
-        """)
-        recent = [{"id": row[0], "title": row[1], "created": row[2]} for row in cursor.fetchall()]
-
-        # Recently used
-        cursor.execute("""
-            SELECT id, title, last_used
-            FROM knowledge
-            WHERE last_used IS NOT NULL
-            ORDER BY last_used DESC
-            LIMIT 5
-        """)
-        recently_used = [
-            {"id": row[0], "title": row[1], "last_used": row[2]} for row in cursor.fetchall()
-        ]
-
-        return {
-            "total_entries": total,
-            "by_project": by_project,
-            "most_used": most_used,
-            "recently_added": recent,
-            "recently_used": recently_used,
-        }
+        return self._maintenance.stats()
 
     def find_duplicates(
         self,
@@ -1069,74 +941,7 @@ class KnowledgeManager:
             List of duplicate groups, where each group is a list of similar entries
             with their similarity scores.
         """
-        if threshold is None:
-            threshold = self.DEFAULT_DUPLICATE_THRESHOLD
-        entries = self.list_all(project=project, limit=self.MAX_DUPLICATE_CHECK_ENTRIES)
-        if len(entries) < 2:
-            return []
-
-        # Track which entries have been grouped
-        grouped_ids: set[str] = set()
-        duplicate_groups: list[list[dict[str, Any]]] = []
-
-        for entry in entries:
-            if entry["id"] in grouped_ids:
-                continue
-
-            # Query ChromaDB for similar entries
-            entry_full = self.get(entry["id"])
-            if not entry_full:
-                continue
-
-            embedding_text = self._create_embedding_text(
-                entry_full["title"],
-                entry_full["description"],
-                entry_full["content"],
-            )
-            query_embedding = self._generate_embedding(embedding_text)
-
-            # Get more results than needed to find all duplicates
-            results = self.collection.query(
-                query_embeddings=[query_embedding],
-                n_results=min(len(entries), self.DEFAULT_DUPLICATE_COMPARISON_LIMIT),
-                include=["distances"],
-            )
-
-            if not results["ids"] or not results["ids"][0]:
-                continue
-
-            # Find entries above threshold (excluding self)
-            group = [{"id": entry["id"], "title": entry["title"], "similarity": 1.0}]
-            ids = results["ids"][0]
-            distances = results["distances"][0] if results["distances"] else []
-
-            for i, kid in enumerate(ids):
-                if kid == entry["id"] or kid in grouped_ids:
-                    continue
-
-                similarity = 1 - distances[i] if i < len(distances) else 0
-                if similarity >= threshold:
-                    other = self.get(kid)
-                    if other:
-                        # Apply project filter if specified
-                        if project and other.get("project") != project:
-                            continue
-                        group.append(
-                            {
-                                "id": kid,
-                                "title": other["title"],
-                                "similarity": round(similarity, 3),
-                            }
-                        )
-
-            # Only include groups with actual duplicates
-            if len(group) > 1:
-                # Mark all in group as processed
-                for item in group:
-                    grouped_ids.add(item["id"])
-                duplicate_groups.append(group)
-
-        return duplicate_groups
+        return self._maintenance.find_duplicates(threshold, project)
 
     def find_stale(
         self,
@@ -1153,65 +958,7 @@ class KnowledgeManager:
         Returns:
             List of stale entries with staleness info.
         """
-        from datetime import timedelta
-
-        if days is None:
-            days = self.DEFAULT_STALE_DAYS
-        cutoff = (datetime.now() - timedelta(days=days)).isoformat()
-
-        cursor = self.conn.cursor()
-
-        # Find entries where both last_used and updated_at are older than cutoff
-        # or where last_used is NULL and updated_at (or created) is older than cutoff
-        if project:
-            cursor.execute(
-                """
-                SELECT id, title, description, created, updated_at, last_used, usage_count
-                FROM knowledge
-                WHERE project = ?
-                AND (
-                    (last_used IS NOT NULL AND last_used < ? AND updated_at < ?)
-                    OR (last_used IS NULL AND COALESCE(updated_at, created) < ?)
-                )
-                ORDER BY COALESCE(last_used, updated_at, created) ASC
-                """,
-                (project, cutoff, cutoff, cutoff),
-            )
-        else:
-            cursor.execute(
-                """
-                SELECT id, title, description, created, updated_at, last_used, usage_count
-                FROM knowledge
-                WHERE (
-                    (last_used IS NOT NULL AND last_used < ? AND updated_at < ?)
-                    OR (last_used IS NULL AND COALESCE(updated_at, created) < ?)
-                )
-                ORDER BY COALESCE(last_used, updated_at, created) ASC
-                """,
-                (cutoff, cutoff, cutoff),
-            )
-
-        rows = cursor.fetchall()
-        stale_entries = []
-
-        for row in rows:
-            entry = dict(row)
-            # Calculate days since last activity
-            last_activity = (
-                entry.get("last_used") or entry.get("updated_at") or entry.get("created")
-            )
-            if last_activity:
-                try:
-                    last_dt = datetime.fromisoformat(last_activity)
-                    days_stale = (datetime.now() - last_dt).days
-                    entry["days_stale"] = days_stale
-                except ValueError:
-                    entry["days_stale"] = None
-            else:
-                entry["days_stale"] = None
-            stale_entries.append(entry)
-
-        return stale_entries
+        return self._maintenance.find_stale(days, project)
 
     def merge_entries(
         self,
@@ -1232,47 +979,7 @@ class KnowledgeManager:
         Returns:
             True if merge succeeded, False if either entry not found.
         """
-        target = self.get(target_id)
-        source = self.get(source_id)
-
-        if not target or not source:
-            return False
-
-        # Merge content
-        merged_content = f"{target['content']}\n\n---\n\n{source['content']}"
-
-        # Merge tags
-        target_tags = json_to_tags(target.get("tags"))
-        source_tags = json_to_tags(source.get("tags"))
-        merged_tags = list(set(target_tags + source_tags))
-
-        # Merge context
-        target_context = json_to_context(target.get("context"))
-        source_context = json_to_context(source.get("context"))
-        merged_context = list(set(target_context + source_context))
-
-        # Update target
-        self.update(
-            target_id,
-            content=merged_content,
-            tags=merged_tags,
-            context=merged_context,
-        )
-
-        # Update usage count (sum both)
-        cursor = self.conn.cursor()
-        new_usage = (target.get("usage_count") or 0) + (source.get("usage_count") or 0)
-        cursor.execute(
-            "UPDATE knowledge SET usage_count = ? WHERE id = ?",
-            (new_usage, target_id),
-        )
-        self.conn.commit()
-
-        # Delete source if requested
-        if delete_source:
-            self.delete(source_id)
-
-        return True
+        return self._maintenance.merge_entries(target_id, source_id, delete_source)
 
     def score_quality(
         self,
@@ -1296,68 +1003,7 @@ class KnowledgeManager:
         Returns:
             List of entries with quality_score field, sorted by score ascending.
         """
-        cursor = self.conn.cursor()
-        if project:
-            cursor.execute(
-                """
-                SELECT id, title, description, content, tags, usage_count, created,
-                       last_used, project
-                FROM knowledge
-                WHERE project = ?
-                """,
-                (project,),
-            )
-        else:
-            cursor.execute(
-                """
-                SELECT id, title, description, content, tags, usage_count, created,
-                       last_used, project
-                FROM knowledge
-                """
-            )
-
-        rows = cursor.fetchall()
-        scored_entries = []
-
-        for row in rows:
-            entry = dict(row)
-            score = 0
-
-            # Tags present: QUALITY_SCORE_WEIGHT points
-            tags_json = entry.get("tags") or "[]"
-            tags_list = json_to_tags(tags_json)
-            if tags_list:
-                score += self.QUALITY_SCORE_WEIGHT
-
-            # Description length >= MIN_DESCRIPTION_LENGTH_FOR_QUALITY: QUALITY_SCORE_WEIGHT points
-            description = entry.get("description") or ""
-            if len(description) >= self.MIN_DESCRIPTION_LENGTH_FOR_QUALITY:
-                score += self.QUALITY_SCORE_WEIGHT
-
-            # Content length >= MIN_CONTENT_LENGTH_FOR_QUALITY: QUALITY_SCORE_WEIGHT points
-            content = entry.get("content") or ""
-            if len(content) >= self.MIN_CONTENT_LENGTH_FOR_QUALITY:
-                score += self.QUALITY_SCORE_WEIGHT
-
-            # Usage count > 0: QUALITY_SCORE_WEIGHT points
-            usage_count = entry.get("usage_count") or 0
-            if usage_count > 0:
-                score += self.QUALITY_SCORE_WEIGHT
-
-            entry["quality_score"] = score
-
-            # Apply score filters
-            if min_score is not None and score < min_score:
-                continue
-            if max_score is not None and score > max_score:
-                continue
-
-            scored_entries.append(entry)
-
-        # Sort by score ascending (lowest quality first for review)
-        scored_entries.sort(key=lambda e: e["quality_score"])
-
-        return scored_entries
+        return self._maintenance.score_quality(project, min_score, max_score)
 
     def export_all(self, project: str | None = None) -> list[dict[str, Any]]:
         """Export all knowledge entries as a list of dictionaries.
@@ -1468,7 +1114,7 @@ class KnowledgeManager:
         self.conn.commit()
         return len(ids)
 
-    # Sync methods
+    # Sync methods (delegated to SyncManager)
 
     def init_sync_dir(self, sync_path: str | Path) -> None:
         """Initialize a sync directory structure.
@@ -1479,213 +1125,7 @@ class KnowledgeManager:
         Raises:
             TimeoutError: If unable to acquire lock within timeout.
         """
-        sync_path = Path(sync_path).expanduser()
-        sync_path.mkdir(parents=True, exist_ok=True)
-
-        # Use file lock to prevent race conditions during initialization
-        with self._file_lock(sync_path / "manifest.json"):
-            (sync_path / "entries").mkdir(exist_ok=True)
-            (sync_path / "tombstones").mkdir(exist_ok=True)
-
-            # Create manifest if it doesn't exist
-            manifest_path = sync_path / "manifest.json"
-            if not manifest_path.exists():
-                self._save_manifest(
-                    sync_path, {"version": 1, "last_sync": {}, "entries": {}}
-                )
-
-            # Create tombstones file if it doesn't exist
-            tombstones_path = sync_path / "tombstones" / "deleted.json"
-            if not tombstones_path.exists():
-                self._save_tombstones(sync_path, {"deletions": []})
-
-    def _load_manifest(self, sync_path: Path) -> dict[str, Any]:
-        """Load sync manifest from sync directory.
-
-        Args:
-            sync_path: Path to sync directory.
-
-        Returns:
-            Manifest dictionary.
-        """
-        manifest_path = sync_path / "manifest.json"
-        if manifest_path.exists():
-            try:
-                with open(manifest_path) as f:
-                    return json.load(f)
-            except (json.JSONDecodeError, OSError):
-                pass
-        return {"version": 1, "last_sync": {}, "entries": {}}
-
-    def _save_manifest(self, sync_path: Path, manifest: dict[str, Any]) -> None:
-        """Save sync manifest to sync directory.
-
-        Args:
-            sync_path: Path to sync directory.
-            manifest: Manifest dictionary.
-        """
-        manifest_path = sync_path / "manifest.json"
-        with open(manifest_path, "w") as f:
-            json.dump(manifest, f, indent=2)
-
-    def _load_tombstones(self, sync_path: Path) -> dict[str, dict[str, str]]:
-        """Load tombstones (deletion records) from sync directory.
-
-        Args:
-            sync_path: Path to sync directory.
-
-        Returns:
-            Dictionary mapping entry ID to deletion info.
-        """
-        tombstones_path = sync_path / "tombstones" / "deleted.json"
-        if tombstones_path.exists():
-            try:
-                with open(tombstones_path) as f:
-                    data = json.load(f)
-                    # Convert list to dict keyed by ID for fast lookup
-                    return {d["id"]: d for d in data.get("deletions", [])}
-            except (json.JSONDecodeError, OSError):
-                pass
-        return {}
-
-    def _save_tombstones(
-        self, sync_path: Path, tombstones: dict[str, Any] | list[dict[str, Any]]
-    ) -> None:
-        """Save tombstones to sync directory.
-
-        Args:
-            sync_path: Path to sync directory.
-            tombstones: Either a dict keyed by ID, or a dict with "deletions" list.
-        """
-        tombstones_path = sync_path / "tombstones" / "deleted.json"
-        tombstones_path.parent.mkdir(exist_ok=True)
-
-        # Handle both formats
-        if isinstance(tombstones, dict) and "deletions" in tombstones:
-            data = tombstones
-        else:
-            # Convert dict keyed by ID to list format
-            data = {"deletions": list(tombstones.values())}
-
-        with open(tombstones_path, "w") as f:
-            json.dump(data, f, indent=2)
-
-    def _export_entry_for_sync(self, entry: dict[str, Any]) -> dict[str, Any]:
-        """Convert a database entry to sync format.
-
-        Args:
-            entry: Entry from SQLite.
-
-        Returns:
-            Entry in sync format with parsed JSON fields.
-        """
-        return {
-            "id": entry["id"],
-            "title": entry["title"],
-            "description": entry["description"],
-            "content": entry["content"],
-            "brief": entry.get("brief"),
-            "tags": json_to_tags(entry.get("tags")),
-            "context": json_to_context(entry.get("context")),
-            "created": entry.get("created"),
-            "updated_at": entry.get("updated_at"),
-            "last_used": entry.get("last_used"),
-            "usage_count": entry.get("usage_count", 0),
-            "confidence": entry.get("confidence", 1.0),
-            "source": entry.get("source"),
-            "project": entry.get("project"),
-            "content_hash": compute_content_hash(entry),
-        }
-
-    def _get_local_state(self, project: str | None = None) -> dict[str, dict[str, Any]]:
-        """Get current state of all local entries.
-
-        Args:
-            project: Optional project filter.
-
-        Returns:
-            Dictionary mapping entry ID to state info (hash, updated_at).
-        """
-        entries = self.export_all(project=project)
-        return {
-            entry["id"]: {
-                "content_hash": compute_content_hash(entry),
-                "updated_at": entry.get("updated_at") or entry.get("created"),
-            }
-            for entry in entries
-        }
-
-    def _get_remote_state(self, sync_path: Path) -> dict[str, dict[str, Any]]:
-        """Get current state of all remote entries in sync directory.
-
-        Args:
-            sync_path: Path to sync directory.
-
-        Returns:
-            Dictionary mapping entry ID to state info (hash, updated_at).
-        """
-        entries_dir = sync_path / "entries"
-        state = {}
-
-        if not entries_dir.exists():
-            return state
-
-        for entry_file in entries_dir.glob("*.json"):
-            try:
-                with open(entry_file) as f:
-                    entry = json.load(f)
-                    entry_id = entry.get("id")
-                    if entry_id:
-                        state[entry_id] = {
-                            "content_hash": entry.get("content_hash")
-                            or compute_content_hash(entry),
-                            "updated_at": entry.get("updated_at") or entry.get("created"),
-                        }
-            except (json.JSONDecodeError, OSError):
-                continue
-
-        return state
-
-    def _read_remote_entry(self, sync_path: Path, entry_id: str) -> dict[str, Any] | None:
-        """Read a single entry from the sync directory.
-
-        Args:
-            sync_path: Path to sync directory.
-            entry_id: ID of entry to read.
-
-        Returns:
-            Entry dictionary or None if not found.
-        """
-        entry_path = sync_path / "entries" / f"{entry_id}.json"
-        if entry_path.exists():
-            try:
-                with open(entry_path) as f:
-                    return json.load(f)
-            except (json.JSONDecodeError, OSError):
-                pass
-        return None
-
-    def _write_remote_entry(self, sync_path: Path, entry: dict[str, Any]) -> None:
-        """Write an entry to the sync directory.
-
-        Args:
-            sync_path: Path to sync directory.
-            entry: Entry to write.
-        """
-        entry_path = sync_path / "entries" / f"{entry['id']}.json"
-        with open(entry_path, "w") as f:
-            json.dump(entry, f, indent=2)
-
-    def _delete_remote_entry(self, sync_path: Path, entry_id: str) -> None:
-        """Delete an entry from the sync directory.
-
-        Args:
-            sync_path: Path to sync directory.
-            entry_id: ID of entry to delete.
-        """
-        entry_path = sync_path / "entries" / f"{entry_id}.json"
-        if entry_path.exists():
-            entry_path.unlink()
+        self._sync.init_sync_dir(sync_path)
 
     def sync_status(
         self,
@@ -1701,109 +1141,7 @@ class KnowledgeManager:
         Returns:
             Dictionary with pending changes.
         """
-        if sync_path is None:
-            sync_path = self.get_sync_path()
-            if sync_path is None:
-                raise ValueError("No sync path configured. Run sync with a path first.")
-        else:
-            sync_path = Path(sync_path).expanduser()
-
-        if not sync_path.exists():
-            return {"error": "Sync directory does not exist"}
-
-        manifest = self._load_manifest(sync_path)
-        tombstones = self._load_tombstones(sync_path)
-        local_state = self._get_local_state(project=project)
-        remote_state = self._get_remote_state(sync_path)
-        manifest_entries = manifest.get("entries", {})
-
-        to_push = []
-        to_pull = []
-        conflicts = []
-        to_delete_local = []
-        to_delete_remote = []
-
-        all_ids = set(local_state.keys()) | set(remote_state.keys())
-
-        for entry_id in all_ids:
-            local = local_state.get(entry_id)
-            remote = remote_state.get(entry_id)
-            manifest_entry = manifest_entries.get(entry_id)
-            tombstone = tombstones.get(entry_id)
-
-            action = self._categorize_entry(entry_id, local, remote, manifest_entry, tombstone)
-
-            if action == "push":
-                to_push.append(entry_id)
-            elif action == "pull":
-                to_pull.append(entry_id)
-            elif action == "conflict":
-                conflicts.append(entry_id)
-            elif action == "delete_local":
-                to_delete_local.append(entry_id)
-            elif action == "delete_remote":
-                to_delete_remote.append(entry_id)
-
-        return {
-            "to_push": to_push,
-            "to_pull": to_pull,
-            "conflicts": conflicts,
-            "to_delete_local": to_delete_local,
-            "to_delete_remote": to_delete_remote,
-            "sync_path": str(sync_path),
-        }
-
-    def _categorize_entry(
-        self,
-        entry_id: str,
-        local_state: dict[str, Any] | None,
-        remote_state: dict[str, Any] | None,
-        manifest_state: dict[str, Any] | None,
-        tombstone: dict[str, str] | None,
-    ) -> str:
-        """Categorize an entry for sync action.
-
-        Returns one of: "no_change", "push", "pull", "conflict",
-        "delete_local", "delete_remote", "skip"
-        """
-        local_exists = local_state is not None
-        remote_exists = remote_state is not None
-        was_synced = manifest_state is not None
-        tombstone_time = tombstone.get("deleted_at") if tombstone else None
-
-        if local_exists and remote_exists:
-            local_hash = local_state["content_hash"]
-            remote_hash = remote_state["content_hash"]
-
-            if local_hash == remote_hash:
-                return "no_change"
-
-            manifest_hash = manifest_state["content_hash"] if was_synced else None
-            local_changed = local_hash != manifest_hash
-            remote_changed = remote_hash != manifest_hash
-
-            if local_changed and not remote_changed:
-                return "push"
-            elif remote_changed and not local_changed:
-                return "pull"
-            else:
-                return "conflict"
-
-        elif local_exists and not remote_exists:
-            if tombstone_time:
-                local_updated = local_state.get("updated_at", "")
-                if tombstone_time > local_updated:
-                    return "delete_local"
-            return "push"
-
-        elif remote_exists and not local_exists:
-            if tombstone_time:
-                remote_updated = remote_state.get("updated_at", "")
-                if tombstone_time > remote_updated:
-                    return "delete_remote"
-            return "pull"
-
-        return "skip"
+        return self._sync.sync_status(sync_path, project)
 
     def sync(
         self,
@@ -1831,325 +1169,9 @@ class KnowledgeManager:
         Raises:
             TimeoutError: If unable to acquire lock within timeout.
         """
-        result = SyncResult()
+        return self._sync.sync(sync_path, strategy, push_only, pull_only, dry_run, project)
 
-        # Resolve sync path
-        if sync_path is None:
-            sync_path = self.get_sync_path()
-            if sync_path is None:
-                result.errors.append("No sync path configured. Provide a path argument.")
-                return result
-        else:
-            sync_path = Path(sync_path).expanduser()
-
-        # Initialize sync directory if needed
-        manifest_exists = (sync_path / "manifest.json").exists()
-        if not sync_path.exists() or not manifest_exists:
-            if dry_run:
-                if not sync_path.exists():
-                    result.errors.append(f"Sync directory does not exist: {sync_path}")
-                else:
-                    result.errors.append(f"Sync directory not initialized: {sync_path}")
-                return result
-            self.init_sync_dir(sync_path)
-
-        # Save sync path for future use
-        if not dry_run:
-            self.set_sync_path(sync_path)
-
-        # Acquire file lock to prevent concurrent sync operations
-        with self._file_lock(sync_path / "manifest.json"):
-            manifest = self._load_manifest(sync_path)
-            tombstones = self._load_tombstones(sync_path)
-            local_state = self._get_local_state(project=project)
-            remote_state = self._get_remote_state(sync_path)
-            local_sync_state = self._get_local_sync_state()  # What this machine last synced
-            manifest_entries = manifest.get("entries", {})
-
-            all_ids = set(local_state.keys()) | set(remote_state.keys())
-
-            for entry_id in all_ids:
-                local = local_state.get(entry_id)
-                remote = remote_state.get(entry_id)
-                last_synced = local_sync_state.get(entry_id)  # Use local sync state
-                tombstone = tombstones.get(entry_id)
-
-                action = self._categorize_entry(
-                    entry_id, local, remote, last_synced, tombstone
-                )
-
-                if action == "no_change":
-                    continue
-                elif action == "push" and not pull_only:
-                    self._handle_push(
-                        sync_path,
-                        entry_id,
-                        manifest_entries,
-                        local_sync_state,
-                        dry_run,
-                        result,
-                    )
-                elif action == "pull" and not push_only:
-                    self._handle_pull(
-                        sync_path,
-                        entry_id,
-                        manifest_entries,
-                        local_sync_state,
-                        dry_run,
-                        result,
-                    )
-                elif action == "conflict":
-                    self._handle_conflict(
-                        sync_path,
-                        entry_id,
-                        local,
-                        remote,
-                        manifest_entries,
-                        local_sync_state,
-                        strategy,
-                        push_only,
-                        pull_only,
-                        dry_run,
-                        result,
-                    )
-                elif action == "delete_local" and not push_only:
-                    self._handle_delete_local(entry_id, local_sync_state, dry_run, result)
-                elif action == "delete_remote" and not pull_only:
-                    self._handle_delete_remote(
-                        sync_path,
-                        entry_id,
-                        manifest_entries,
-                        local_sync_state,
-                        dry_run,
-                        result,
-                    )
-
-            # Update manifest and local sync state
-            if not dry_run:
-                machine_id = get_machine_id()
-                manifest["last_sync"][machine_id] = datetime.now().isoformat()
-                manifest["entries"] = manifest_entries
-                self._save_manifest(sync_path, manifest)
-                self._set_local_sync_state(local_sync_state)
-
-        return result
-
-    def _handle_push(
-        self,
-        sync_path: Path,
-        entry_id: str,
-        manifest_entries: dict[str, Any],
-        local_sync_state: dict[str, Any],
-        dry_run: bool,
-        result: SyncResult,
-    ) -> None:
-        """Handle pushing a local entry to sync directory."""
-        entry = self.get(entry_id)
-        if not entry:
-            return
-
-        sync_entry = self._export_entry_for_sync(entry)
-
-        if not dry_run:
-            self._write_remote_entry(sync_path, sync_entry)
-            state_update = {
-                "content_hash": sync_entry["content_hash"],
-                "updated_at": sync_entry["updated_at"],
-            }
-            manifest_entries[entry_id] = state_update
-            local_sync_state[entry_id] = state_update
-
-        result.pushed += 1
-
-    def _handle_pull(
-        self,
-        sync_path: Path,
-        entry_id: str,
-        manifest_entries: dict[str, Any],
-        local_sync_state: dict[str, Any],
-        dry_run: bool,
-        result: SyncResult,
-    ) -> None:
-        """Handle pulling a remote entry to local database."""
-        remote_entry = self._read_remote_entry(sync_path, entry_id)
-        if not remote_entry:
-            return
-
-        if not dry_run:
-            # Check if entry exists locally (update vs insert)
-            existing = self.get(entry_id)
-            if existing:
-                # Update existing entry
-                self.update(
-                    entry_id,
-                    title=remote_entry["title"],
-                    description=remote_entry["description"],
-                    content=remote_entry["content"],
-                    tags=remote_entry.get("tags"),
-                    context=remote_entry.get("context"),
-                    project=remote_entry.get("project"),
-                    confidence=remote_entry.get("confidence", 1.0),
-                )
-            else:
-                # Import new entry, preserving the original ID
-                self._import_entry_with_id(remote_entry)
-
-            state_update = {
-                "content_hash": remote_entry.get("content_hash")
-                or compute_content_hash(remote_entry),
-                "updated_at": remote_entry.get("updated_at"),
-            }
-            manifest_entries[entry_id] = state_update
-            local_sync_state[entry_id] = state_update
-
-        result.pulled += 1
-
-    def _import_entry_with_id(self, entry: dict[str, Any]) -> None:
-        """Import an entry preserving its original ID.
-
-        Args:
-            entry: Entry dictionary from sync format.
-        """
-        # Generate embedding
-        embedding_text = self._create_embedding_text(
-            entry["title"],
-            entry["description"],
-            entry["content"],
-        )
-        embedding = self._generate_embedding(embedding_text)
-
-        # Store in ChromaDB with original ID
-        metadata = {
-            "title": entry["title"],
-            "project": entry.get("project") or "",
-        }
-        self.collection.add(
-            ids=[entry["id"]],
-            embeddings=[embedding],
-            metadatas=[metadata],
-            documents=[embedding_text],
-        )
-
-        # Store in SQLite with original ID
-        brief = create_brief(entry["content"])
-        cursor = self.conn.cursor()
-        cursor.execute(
-            """
-            INSERT INTO knowledge (
-                id, title, description, content, brief, tags, context,
-                created, updated_at, source, project, confidence
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                entry["id"],
-                entry["title"],
-                entry["description"],
-                entry["content"],
-                brief,
-                tags_to_json(entry.get("tags")),
-                context_to_json(entry.get("context")),
-                entry.get("created") or datetime.now().isoformat(),
-                entry.get("updated_at") or datetime.now().isoformat(),
-                entry.get("source", "sync"),
-                entry.get("project"),
-                entry.get("confidence", 1.0),
-            ),
-        )
-        self.conn.commit()
-
-    def _handle_conflict(
-        self,
-        sync_path: Path,
-        entry_id: str,
-        local_state: dict[str, Any],
-        remote_state: dict[str, Any],
-        manifest_entries: dict[str, Any],
-        local_sync_state: dict[str, Any],
-        strategy: str,
-        push_only: bool,
-        pull_only: bool,
-        dry_run: bool,
-        result: SyncResult,
-    ) -> None:
-        """Handle a sync conflict."""
-        local_entry = self.get(entry_id)
-        remote_entry = self._read_remote_entry(sync_path, entry_id)
-
-        if not local_entry or not remote_entry:
-            return
-
-        local_updated = local_state.get("updated_at", "")
-        remote_updated = remote_state.get("updated_at", "")
-
-        conflict_info = {
-            "id": entry_id,
-            "title": local_entry.get("title", ""),
-            "local_updated": local_updated,
-            "remote_updated": remote_updated,
-            "resolution": "pending",
-        }
-
-        if strategy == "manual":
-            conflict_info["resolution"] = "manual"
-            result.conflicts.append(conflict_info)
-            return
-
-        # Determine winner based on strategy
-        if strategy == "local-wins":
-            use_local = True
-        elif strategy == "remote-wins":
-            use_local = False
-        else:  # last-write-wins
-            use_local = local_updated >= remote_updated
-
-        if use_local and not pull_only:
-            conflict_info["resolution"] = "local"
-            self._handle_push(
-                sync_path, entry_id, manifest_entries, local_sync_state, dry_run, result
-            )
-        elif not use_local and not push_only:
-            conflict_info["resolution"] = "remote"
-            self._handle_pull(
-                sync_path, entry_id, manifest_entries, local_sync_state, dry_run, result
-            )
-        else:
-            conflict_info["resolution"] = "skipped"
-
-        result.conflicts.append(conflict_info)
-
-    def _handle_delete_local(
-        self,
-        entry_id: str,
-        local_sync_state: dict[str, Any],
-        dry_run: bool,
-        result: SyncResult,
-    ) -> None:
-        """Handle deleting a local entry that was deleted remotely."""
-        if not dry_run:
-            self.delete(entry_id)
-            if entry_id in local_sync_state:
-                del local_sync_state[entry_id]
-        result.deletions_pulled += 1
-
-    def _handle_delete_remote(
-        self,
-        sync_path: Path,
-        entry_id: str,
-        manifest_entries: dict[str, Any],
-        local_sync_state: dict[str, Any],
-        dry_run: bool,
-        result: SyncResult,
-    ) -> None:
-        """Handle deleting a remote entry that was deleted locally."""
-        if not dry_run:
-            self._delete_remote_entry(sync_path, entry_id)
-            if entry_id in manifest_entries:
-                del manifest_entries[entry_id]
-            if entry_id in local_sync_state:
-                del local_sync_state[entry_id]
-        result.deletions_pushed += 1
-
-    # Session processing methods
+    # Session processing methods (delegated to ProcessingTracker)
 
     def is_session_processed(self, session_id: str) -> bool:
         """Check if a session has been processed.
@@ -2160,12 +1182,7 @@ class KnowledgeManager:
         Returns:
             True if the session has been processed.
         """
-        cursor = self.conn.cursor()
-        cursor.execute(
-            "SELECT 1 FROM processed_sessions WHERE session_id = ?",
-            (session_id,),
-        )
-        return cursor.fetchone() is not None
+        return self._tracker.is_session_processed(session_id)
 
     def mark_session_processed(
         self,
@@ -2180,16 +1197,7 @@ class KnowledgeManager:
             project_path: Project path.
             entries_created: Number of knowledge entries created from this session.
         """
-        cursor = self.conn.cursor()
-        cursor.execute(
-            """
-            INSERT OR REPLACE INTO processed_sessions
-            (session_id, project_path, processed_at, entries_created)
-            VALUES (?, ?, CURRENT_TIMESTAMP, ?)
-            """,
-            (session_id, project_path, entries_created),
-        )
-        self.conn.commit()
+        self._tracker.mark_session_processed(session_id, project_path, entries_created)
 
     def get_processed_sessions(
         self,
@@ -2203,28 +1211,9 @@ class KnowledgeManager:
         Returns:
             List of processed session records.
         """
-        cursor = self.conn.cursor()
-        if project_path:
-            cursor.execute(
-                """
-                SELECT session_id, project_path, processed_at, entries_created
-                FROM processed_sessions
-                WHERE project_path = ?
-                ORDER BY processed_at DESC
-                """,
-                (project_path,),
-            )
-        else:
-            cursor.execute(
-                """
-                SELECT session_id, project_path, processed_at, entries_created
-                FROM processed_sessions
-                ORDER BY processed_at DESC
-                """
-            )
-        return [dict(row) for row in cursor.fetchall()]
+        return self._tracker.get_processed_sessions(project_path)
 
-    # Git commit processing methods
+    # Git commit processing methods (delegated to ProcessingTracker)
 
     def is_commit_processed(self, commit_sha: str, repo_path: str) -> bool:
         """Check if a commit has been processed.
@@ -2236,12 +1225,7 @@ class KnowledgeManager:
         Returns:
             True if the commit has been processed.
         """
-        cursor = self.conn.cursor()
-        cursor.execute(
-            "SELECT 1 FROM processed_commits WHERE commit_sha = ? AND repo_path = ?",
-            (commit_sha, repo_path),
-        )
-        return cursor.fetchone() is not None
+        return self._tracker.is_commit_processed(commit_sha, repo_path)
 
     def mark_commit_processed(
         self,
@@ -2256,16 +1240,7 @@ class KnowledgeManager:
             repo_path: Path to the repository.
             entries_created: Number of knowledge entries created from this commit.
         """
-        cursor = self.conn.cursor()
-        cursor.execute(
-            """
-            INSERT OR REPLACE INTO processed_commits
-            (commit_sha, repo_path, processed_at, entries_created)
-            VALUES (?, ?, CURRENT_TIMESTAMP, ?)
-            """,
-            (commit_sha, repo_path, entries_created),
-        )
-        self.conn.commit()
+        self._tracker.mark_commit_processed(commit_sha, repo_path, entries_created)
 
     def get_processed_commits(
         self,
@@ -2279,28 +1254,9 @@ class KnowledgeManager:
         Returns:
             List of processed commit records.
         """
-        cursor = self.conn.cursor()
-        if repo_path:
-            cursor.execute(
-                """
-                SELECT commit_sha, repo_path, processed_at, entries_created
-                FROM processed_commits
-                WHERE repo_path = ?
-                ORDER BY processed_at DESC
-                """,
-                (repo_path,),
-            )
-        else:
-            cursor.execute(
-                """
-                SELECT commit_sha, repo_path, processed_at, entries_created
-                FROM processed_commits
-                ORDER BY processed_at DESC
-                """
-            )
-        return [dict(row) for row in cursor.fetchall()]
+        return self._tracker.get_processed_commits(repo_path)
 
-    # File processing methods (for code analysis)
+    # File processing methods (delegated to ProcessingTracker)
 
     def is_file_processed(
         self,
@@ -2319,21 +1275,7 @@ class KnowledgeManager:
         Returns:
             True if the file has been processed (and hasn't changed if hash provided).
         """
-        cursor = self.conn.cursor()
-        if content_hash:
-            cursor.execute(
-                """
-                SELECT 1 FROM processed_files
-                WHERE file_path = ? AND repo_path = ? AND content_hash = ?
-                """,
-                (file_path, repo_path, content_hash),
-            )
-        else:
-            cursor.execute(
-                "SELECT 1 FROM processed_files WHERE file_path = ? AND repo_path = ?",
-                (file_path, repo_path),
-            )
-        return cursor.fetchone() is not None
+        return self._tracker.is_file_processed(file_path, repo_path, content_hash)
 
     def mark_file_processed(
         self,
@@ -2350,16 +1292,7 @@ class KnowledgeManager:
             repo_path: Path to the repository.
             entries_created: Number of knowledge entries created from this file.
         """
-        cursor = self.conn.cursor()
-        cursor.execute(
-            """
-            INSERT OR REPLACE INTO processed_files
-            (file_path, content_hash, repo_path, processed_at, entries_created)
-            VALUES (?, ?, ?, CURRENT_TIMESTAMP, ?)
-            """,
-            (file_path, content_hash, repo_path, entries_created),
-        )
-        self.conn.commit()
+        self._tracker.mark_file_processed(file_path, content_hash, repo_path, entries_created)
 
     def get_processed_files(
         self,
@@ -2373,26 +1306,7 @@ class KnowledgeManager:
         Returns:
             List of processed file records.
         """
-        cursor = self.conn.cursor()
-        if repo_path:
-            cursor.execute(
-                """
-                SELECT file_path, content_hash, repo_path, processed_at, entries_created
-                FROM processed_files
-                WHERE repo_path = ?
-                ORDER BY processed_at DESC
-                """,
-                (repo_path,),
-            )
-        else:
-            cursor.execute(
-                """
-                SELECT file_path, content_hash, repo_path, processed_at, entries_created
-                FROM processed_files
-                ORDER BY processed_at DESC
-                """
-            )
-        return [dict(row) for row in cursor.fetchall()]
+        return self._tracker.get_processed_files(repo_path)
 
     def close(self) -> None:
         """Close database connections."""
