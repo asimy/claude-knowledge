@@ -340,3 +340,117 @@ def print_collection_member(member: dict) -> None:
         f"  [dim]{member['id']}[/dim]: [bold]{member['title']}[/bold]"
         f"{tag_str}{project_str}{added_str}"
     )
+
+
+def print_version_summary(version: dict, show_full: bool = False) -> None:
+    """Print a formatted version summary.
+
+    Args:
+        version: Version dictionary with version_number, title, created_at, etc.
+        show_full: Whether to show additional details.
+    """
+    version_num = version.get("version_number", "?")
+    title = version.get("title", "(untitled)")
+    created_at = version.get("created_at", "")
+    created_by = version.get("created_by", "")
+    change_summary = version.get("change_summary", "")
+
+    # Format timestamp
+    if created_at:
+        # Show date and time
+        timestamp = created_at[:19].replace("T", " ")
+    else:
+        timestamp = "(unknown)"
+
+    console.print(f"  [bold cyan]v{version_num}[/bold cyan] {title}")
+    console.print(f"    Created: [dim]{timestamp}[/dim]", end="")
+    if created_by:
+        console.print(f" by [dim]{created_by}[/dim]", end="")
+    console.print()
+
+    if change_summary:
+        console.print(f"    [dim]{change_summary}[/dim]")
+
+    if show_full:
+        version_id = version.get("id", "")
+        console.print(f"    ID: [dim]{version_id}[/dim]")
+
+
+def print_version_diff(diff_result: dict) -> None:
+    """Print a formatted diff between versions.
+
+    Args:
+        diff_result: Dictionary from VersioningService.diff() containing
+                    version info and diff strings.
+    """
+    version_a = diff_result.get("version_a", {})
+    version_b = diff_result.get("version_b", {})
+
+    # Print version comparison header
+    ver_a_num = version_a.get("number", "?")
+    ver_b_label = version_b.get("label", f"v{version_b.get('number', '?')}")
+
+    console.print(f"[bold]Comparing v{ver_a_num} -> {ver_b_label}[/bold]")
+    console.print()
+
+    # Track if any changes
+    has_changes = False
+
+    # Title diff
+    title_diff = diff_result.get("title_diff")
+    if title_diff:
+        has_changes = True
+        console.print("[bold]Title changes:[/bold]")
+        _print_unified_diff(title_diff)
+        console.print()
+
+    # Description diff
+    desc_diff = diff_result.get("description_diff")
+    if desc_diff:
+        has_changes = True
+        console.print("[bold]Description changes:[/bold]")
+        _print_unified_diff(desc_diff)
+        console.print()
+
+    # Content diff
+    content_diff = diff_result.get("content_diff")
+    if content_diff:
+        has_changes = True
+        console.print("[bold]Content changes:[/bold]")
+        _print_unified_diff(content_diff)
+        console.print()
+
+    # Other changes
+    other_changes = []
+    if diff_result.get("tags_changed"):
+        other_changes.append("tags")
+    if diff_result.get("project_changed"):
+        other_changes.append("project")
+    if diff_result.get("confidence_changed"):
+        other_changes.append("confidence")
+
+    if other_changes:
+        has_changes = True
+        console.print(f"[bold]Also changed:[/bold] {', '.join(other_changes)}")
+
+    if not has_changes:
+        console.print("[dim]No differences found[/dim]")
+
+
+def _print_unified_diff(diff_text: str) -> None:
+    """Print unified diff with syntax highlighting.
+
+    Args:
+        diff_text: Unified diff string.
+    """
+    for line in diff_text.splitlines():
+        if line.startswith("+++") or line.startswith("---"):
+            console.print(f"[bold]{line}[/bold]")
+        elif line.startswith("@@"):
+            console.print(f"[cyan]{line}[/cyan]")
+        elif line.startswith("+"):
+            console.print(f"[green]{line}[/green]")
+        elif line.startswith("-"):
+            console.print(f"[red]{line}[/red]")
+        else:
+            console.print(line)

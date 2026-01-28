@@ -2,22 +2,7 @@
 
 This document outlines potential future directions for the Claude Knowledge Management System.
 
-## v1.0 Release Criteria
-
-The following features must be completed before the 1.0 release:
-
-- [x] **Knowledge Relationships** (Linking, Collections, Dependency Tracking)
-- [ ] **Versioning** (Entry History, Rollback, Diff View)
-- [x] **Automatic Knowledge Extraction** (Code Analysis, Session Summarization, Documentation Mining)
-- [x] **Search Enhancements** (Tag Filtering, Date Filtering, Fuzzy Matching)
-
-## Medium-term
-
-### Versioning
-
-- **Entry History**: Track changes to entries over time
-- **Rollback**: Restore previous versions of entries
-- **Diff View**: Compare versions of an entry
+## Future
 
 ### Performance
 
@@ -45,6 +30,25 @@ The following features must be completed before the 1.0 release:
 - **Remote Storage**: Store knowledge in external databases for team sharing
 
 ## Completed
+
+### v1.0.0
+
+First stable release with all planned core features:
+
+- **Knowledge Relationships**: Linking entries, collections, dependency tracking
+- **Versioning**: Entry history, rollback, diff view
+- **Automatic Knowledge Extraction**: Code analysis, session summarization
+- **Search Enhancements**: Tag filtering, date filtering, fuzzy matching
+
+### v0.11.0
+
+- Entry versioning with automatic snapshots on update
+- Version history with `history` command
+- Rollback to previous versions with `rollback` command
+- Diff view between versions with `diff` command
+- Configurable version retention (default: 50 versions per entry)
+- Automatic version pruning when retention limit exceeded
+- Change summaries tracking which fields were modified
 
 ### v0.10.0
 

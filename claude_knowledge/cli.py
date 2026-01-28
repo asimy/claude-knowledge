@@ -20,6 +20,8 @@ from claude_knowledge.output import (
     print_relationship,
     print_search_item,
     print_success,
+    print_version_diff,
+    print_version_summary,
     print_warning,
 )
 from claude_knowledge.utils import json_to_tags, parse_relative_date
@@ -794,6 +796,74 @@ def create_parser() -> argparse.ArgumentParser:
     )
     if entry_id_completer:
         coll_remove_entries.completer = entry_id_completer
+
+    # history command
+    history_parser = subparsers.add_parser(
+        "history",
+        help="Show version history for an entry",
+    )
+    history_id = history_parser.add_argument(
+        "id",
+        help="Knowledge entry ID",
+    )
+    if entry_id_completer:
+        history_id.completer = entry_id_completer
+    history_parser.add_argument(
+        "--limit",
+        type=int,
+        help="Maximum number of versions to show",
+    )
+    history_parser.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+
+    # rollback command
+    rollback_parser = subparsers.add_parser(
+        "rollback",
+        help="Restore an entry to a previous version",
+    )
+    rollback_id = rollback_parser.add_argument(
+        "id",
+        help="Knowledge entry ID",
+    )
+    if entry_id_completer:
+        rollback_id.completer = entry_id_completer
+    rollback_parser.add_argument(
+        "version",
+        type=int,
+        help="Version number to restore",
+    )
+    rollback_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Skip confirmation prompt",
+    )
+
+    # diff command
+    diff_parser = subparsers.add_parser(
+        "diff",
+        help="Compare versions of an entry",
+    )
+    diff_id = diff_parser.add_argument(
+        "id",
+        help="Knowledge entry ID",
+    )
+    if entry_id_completer:
+        diff_id.completer = entry_id_completer
+    diff_parser.add_argument(
+        "version_a",
+        type=int,
+        help="First version number",
+    )
+    diff_parser.add_argument(
+        "version_b",
+        type=int,
+        nargs="?",
+        help="Second version number (default: current state)",
+    )
 
     return parser
 
@@ -2214,6 +2284,89 @@ def cmd_collection_remove(args: argparse.Namespace, km: KnowledgeManager) -> int
     return 0
 
 
+def cmd_history(args: argparse.Namespace, km: KnowledgeManager) -> int:
+    """Handle the history command."""
+    # Check if entry exists
+    entry = km.get(args.id)
+    if not entry:
+        print_error(f"Knowledge entry not found: {args.id}")
+        return 1
+
+    versions = km.get_history(args.id, limit=args.limit)
+
+    if not versions:
+        console.print(f"No version history for entry: {args.id}")
+        console.print("[dim]Versions are created when an entry is updated.[/dim]")
+        return 0
+
+    if args.format == "json":
+        print(json.dumps(versions, indent=2))
+    else:
+        console.print(f"[bold]Version history for:[/bold] {entry['title']}")
+        console.print(f"[dim]ID: {args.id}[/dim]")
+        console.print(f"\n[cyan]{len(versions)}[/cyan] version(s):\n")
+
+        for version in versions:
+            print_version_summary(version)
+            console.print()
+
+    return 0
+
+
+def cmd_rollback(args: argparse.Namespace, km: KnowledgeManager) -> int:
+    """Handle the rollback command."""
+    # Check if entry exists
+    entry = km.get(args.id)
+    if not entry:
+        print_error(f"Knowledge entry not found: {args.id}")
+        return 1
+
+    # Check if version exists
+    version = km.get_version(args.id, args.version)
+    if not version:
+        print_error(f"Version {args.version} not found for entry: {args.id}")
+        return 1
+
+    # Confirm rollback
+    if not args.force:
+        console.print(f"[bold]Current state:[/bold] {entry['title']}")
+        console.print(f"[bold]Rollback to:[/bold] v{args.version} - {version['title']}")
+        console.print(f"  Created: [dim]{version.get('created_at', '')[:19]}[/dim]")
+        console.print()
+        console.print("This will restore the entry to the selected version.")
+        console.print("The current state will be saved as a new version.")
+        console.print()
+        console.print("Continue? [y/N] ", end="")
+        response = input().strip().lower()
+        if response != "y":
+            print_warning("Aborted.")
+            return 0
+
+    if km.rollback(args.id, args.version):
+        print_success(f"Restored entry to version {args.version}")
+        return 0
+    else:
+        print_error("Rollback failed")
+        return 1
+
+
+def cmd_diff(args: argparse.Namespace, km: KnowledgeManager) -> int:
+    """Handle the diff command."""
+    # Check if entry exists
+    entry = km.get(args.id)
+    if not entry:
+        print_error(f"Knowledge entry not found: {args.id}")
+        return 1
+
+    try:
+        diff_result = km.diff_versions(args.id, args.version_a, args.version_b)
+        print_version_diff(diff_result)
+        return 0
+    except ValueError as e:
+        print_error(str(e))
+        return 1
+
+
 def main(argv: list[str] | None = None) -> int:
     """Main entry point for the CLI."""
     parser = create_parser()
@@ -2283,6 +2436,12 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_unlink(args, km)
         elif args.command == "collection":
             return cmd_collection(args, km)
+        elif args.command == "history":
+            return cmd_history(args, km)
+        elif args.command == "rollback":
+            return cmd_rollback(args, km)
+        elif args.command == "diff":
+            return cmd_diff(args, km)
         else:
             parser.print_help()
             return 0

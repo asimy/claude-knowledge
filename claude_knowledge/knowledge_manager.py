@@ -17,6 +17,7 @@ from claude_knowledge._maintenance import MaintenanceService
 from claude_knowledge._relationships import RelationshipsService
 from claude_knowledge._sync import SyncManager, SyncResult
 from claude_knowledge._tracking import ProcessingTracker
+from claude_knowledge._versioning import VersioningService
 from claude_knowledge.utils import (
     context_to_json,
     create_brief,
@@ -101,6 +102,7 @@ class KnowledgeManager:
         self._init_tracker()
         self._init_maintenance()
         self._init_relationships()
+        self._init_versioning()
         self._init_sync()
 
     def _init_chroma(self) -> None:
@@ -234,6 +236,36 @@ class KnowledgeManager:
             CREATE INDEX IF NOT EXISTS idx_collection_members_entry
             ON collection_members(entry_id)
         """)
+        # Table for entry version history
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS entry_versions (
+                id TEXT PRIMARY KEY,
+                entry_id TEXT NOT NULL,
+                version_number INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                description TEXT NOT NULL,
+                content TEXT NOT NULL,
+                brief TEXT,
+                tags TEXT,
+                context TEXT,
+                confidence REAL DEFAULT 1.0,
+                source TEXT,
+                project TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                created_by TEXT,
+                change_summary TEXT,
+                FOREIGN KEY (entry_id) REFERENCES knowledge(id) ON DELETE CASCADE,
+                UNIQUE(entry_id, version_number)
+            )
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_entry_versions_entry
+            ON entry_versions(entry_id)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_entry_versions_created
+            ON entry_versions(created_at DESC)
+        """)
         self.conn.commit()
         self._migrate_schema()
 
@@ -321,6 +353,12 @@ class KnowledgeManager:
     def _init_relationships(self) -> None:
         """Initialize the relationships service."""
         self._relationships = RelationshipsService(
+            self.conn, self.collection, self._embedding, self
+        )
+
+    def _init_versioning(self) -> None:
+        """Initialize the versioning service."""
+        self._versioning = VersioningService(
             self.conn, self.collection, self._embedding, self
         )
 
@@ -800,11 +838,19 @@ class KnowledgeManager:
 
         return True
 
-    def update(self, knowledge_id: str, **kwargs: Any) -> bool:
+    def update(
+        self,
+        knowledge_id: str,
+        create_version: bool = True,
+        **kwargs: Any,
+    ) -> bool:
         """Update a knowledge entry.
 
         Args:
             knowledge_id: The knowledge entry ID to update.
+            create_version: Whether to create a version snapshot before updating.
+                           Defaults to True. Set to False for internal updates
+                           that shouldn't be versioned (e.g., usage count updates).
             **kwargs: Fields to update (title, description, content, tags, context, project).
 
         Returns:
@@ -839,6 +885,13 @@ class KnowledgeManager:
 
         if not updates:
             return True  # Nothing to update
+
+        # Create version snapshot before making changes
+        if create_version:
+            # Generate change summary from updated fields
+            changed_fields = list(updates.keys())
+            change_summary = f"Updated: {', '.join(changed_fields)}"
+            self._versioning.create_version(knowledge_id, change_summary=change_summary)
 
         # Update brief if content changed
         if "content" in updates:
@@ -1595,6 +1648,91 @@ class KnowledgeManager:
             List of processed file records.
         """
         return self._tracker.get_processed_files(repo_path)
+
+    # Versioning methods (delegated to VersioningService)
+
+    def get_version(self, entry_id: str, version_number: int) -> dict[str, Any] | None:
+        """Retrieve a specific version of an entry.
+
+        Args:
+            entry_id: ID of the entry.
+            version_number: Version number to retrieve.
+
+        Returns:
+            Version dictionary or None if not found.
+        """
+        return self._versioning.get_version(entry_id, version_number)
+
+    def get_history(
+        self,
+        entry_id: str,
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Get version history for an entry.
+
+        Args:
+            entry_id: ID of the entry.
+            limit: Maximum number of versions to return.
+
+        Returns:
+            List of version summaries, ordered by version number descending
+            (newest first).
+        """
+        return self._versioning.get_history(entry_id, limit)
+
+    def rollback(
+        self,
+        entry_id: str,
+        version_number: int,
+        created_by: str | None = None,
+    ) -> bool:
+        """Restore an entry to a previous version.
+
+        Creates a new version capturing the current state before rolling back.
+        Regenerates embeddings for the restored content.
+
+        Args:
+            entry_id: ID of the entry to rollback.
+            version_number: Version number to restore to.
+            created_by: Optional identifier of who initiated the rollback.
+
+        Returns:
+            True if rollback succeeded, False if entry or version not found.
+        """
+        return self._versioning.rollback(entry_id, version_number, created_by)
+
+    def diff_versions(
+        self,
+        entry_id: str,
+        version_a: int,
+        version_b: int | None = None,
+    ) -> dict[str, Any]:
+        """Generate a diff between two versions.
+
+        Args:
+            entry_id: ID of the entry.
+            version_a: First version number.
+            version_b: Second version number. If None, compares to current state.
+
+        Returns:
+            Dictionary containing diff information for title, description,
+            content, and flags for other changed fields.
+
+        Raises:
+            ValueError: If entry or version not found.
+        """
+        return self._versioning.diff(entry_id, version_a, version_b)
+
+    def get_version_count(self, entry_id: str) -> int:
+        """Get the number of versions for an entry.
+
+        Args:
+            entry_id: ID of the entry.
+
+        Returns:
+            Number of versions.
+        """
+        return self._versioning.get_version_count(entry_id)
 
     def close(self) -> None:
         """Close database connections."""
