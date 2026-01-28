@@ -6,18 +6,12 @@ This document outlines potential future directions for the Claude Knowledge Mana
 
 The following features must be completed before the 1.0 release:
 
-- [ ] **Knowledge Relationships** (Linking, Collections, Dependency Tracking)
+- [x] **Knowledge Relationships** (Linking, Collections, Dependency Tracking)
 - [ ] **Versioning** (Entry History, Rollback, Diff View)
 - [x] **Automatic Knowledge Extraction** (Code Analysis, Session Summarization, Documentation Mining)
 - [x] **Search Enhancements** (Tag Filtering, Date Filtering, Fuzzy Matching)
 
 ## Medium-term
-
-### Knowledge Relationships
-
-- **Linking**: Allow entries to reference related entries
-- **Collections**: Group related entries into named collections
-- **Dependency Tracking**: Track which entries depend on or supersede others
 
 ### Versioning
 
@@ -51,6 +45,16 @@ The following features must be completed before the 1.0 release:
 - **Remote Storage**: Store knowledge in external databases for team sharing
 
 ## Completed
+
+### v0.10.0
+
+- Knowledge relationships for linking entries
+- Relationship types: `related`, `depends-on`, `supersedes`
+- Collections for grouping related entries
+- CLI commands: `link`, `unlink`, `collection` (create/delete/list/show/add/remove)
+- Sync support for relationships and collections
+- Relationship and collection display in `get` command output
+- Deletion warnings for entries with relationships or collections
 
 ### v0.9.0
 
